@@ -4,7 +4,7 @@ REST API that exposes a [VintaSend](https://github.com/vintasoftware/vintasend)
 notification service over HTTP, built with Django and
 [django-ninja](https://django-ninja.dev/).
 
-It exists so the [VintaSend dashboard](https://github.com/vintasoftware/vintasend-ts-dashboard)
+It exists so the [VintaSend dashboard](https://github.com/vintasoftware/vintasend-dashboard)
 no longer has to embed a notification service: the dashboard is a pure API client, and
 any implementation of this contract can serve it.
 
