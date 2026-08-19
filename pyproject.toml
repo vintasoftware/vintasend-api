@@ -1,0 +1,96 @@
+[project]
+name = "vintasend-api"
+version = "0.1.0"
+description = "REST API that exposes a VintaSend notification service over HTTP for the VintaSend dashboard UI"
+authors = [{ name = "Vinta Software", email = "contact@vinta.com.br" }]
+license = "MIT"
+readme = "README.md"
+# Bounded above by Django rather than by vintasend (which supports 3.14):
+# the Django 5.2 LTS line tops out at 3.13.
+requires-python = ">=3.10,<3.14"
+# Constraints stay under [tool.poetry.dependencies] to keep caret syntax, which
+# is not valid PEP 621. 'dynamic' tells build tooling the real list lives there.
+dynamic = ["dependencies"]
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.dependencies]
+vintasend = "^2.0.0"
+django = ">=4.2,<6.0"
+django-ninja = "^1.4.3"
+requests = "^2.34.2"
+# Reads the .env file in development. Production deployments set real environment
+# variables instead, so this is only ever a convenience.
+python-dotenv = "^1.1.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+pytest-django = "^4.11.1"
+ruff = "^0.15.22"
+mypy = "^2.3.0"
+django-stubs = "^5.2.0"
+types-requests = "^2.32.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "vintasend_api.settings"
+python_files = ["test_*.py"]
+testpaths = ["vintasend_api"]
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+# Must track the MINIMUM Python in [tool.poetry.dependencies]. Setting this higher
+# lets pyupgrade rewrite code into syntax that breaks the older interpreters this
+# project still supports.
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "N", "UP", "B", "S", "BLE", "A", "I", "G", "INP", "RUF"]
+ignore = [
+    "E501",
+    # Allow `except Exception`: the error handler deliberately catches everything so a
+    # backend failure becomes an INTERNAL_ERROR envelope instead of a stack trace.
+    "BLE001",
+    "RUF100",
+    "UP035",
+    "UP037",
+]
+
+[tool.ruff.lint.isort]
+section-order = ["future", "standard-library", "django", "third-party", "first-party", "local-folder"]
+lines-after-imports = 2
+
+[tool.ruff.lint.isort.sections]
+"django" = ["django", "ninja"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F403", "F405"]
+"**/tests/*" = ["S", "N802", "N815"]
+# The wire contract is written with camelCase attribute names on purpose: the schema
+# classes are meant to be read side by side with `openapi.yaml` and with the TypeScript
+# reference's `src/contract/types.ts`. Renaming them to snake_case with aliases would
+# hide the one thing these classes exist to make obvious.
+"vintasend_api/dashboard/contract.py" = ["N815"]
+"vintasend_api/dashboard/query.py" = ["N815"]
+# The dotted name is the point: this file is copied to `vintasend_config.py`, never
+# imported as it stands. It mirrors the TypeScript reference's
+# `vintasend.config.example.ts`.
+"vintasend_api/vintasend_config.example.py" = ["N999"]
+
+[tool.mypy]
+files = ["vintasend_api"]
+# Must track the MINIMUM Python in [tool.poetry.dependencies], so errors that only
+# appear on the oldest interpreter are not hidden.
+python_version = "3.10"
+show_error_codes = true
+strict_equality = true
+warn_no_return = true
+plugins = ["mypy_django_plugin.main"]
+
+[tool.django-stubs]
+django_settings_module = "vintasend_api.settings"

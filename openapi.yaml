@@ -1,0 +1,578 @@
+openapi: 3.1.0
+info:
+  title: VintaSend Dashboard API
+  version: 1.0.0
+  description: |
+    HTTP contract between a VintaSend notification service and the VintaSend
+    dashboard UI.
+
+    This document is the source of truth for the contract. The TypeScript server
+    in this repository implements it; any other implementation (for example one
+    backed by the Python `vintasend` package) must match it exactly so the same
+    dashboard UI can consume either.
+
+    Conventions:
+      * All timestamps are ISO-8601 strings in UTC, and are `null` when unset.
+      * `page` is 1-indexed in the API. VintaSend backends are 0-indexed; that
+        conversion is the server's responsibility.
+      * Every non-2xx response uses the `ErrorResponse` envelope.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:3333
+    description: Local development
+security:
+  - apiKey: []
+tags:
+  - name: notifications
+  - name: system
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, apiVersion]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  apiVersion:
+                    type: string
+                    example: v1
+
+  /api/v1/capabilities:
+    get:
+      tags: [system]
+      summary: Filter capabilities of the configured backend
+      description: |
+        Flat dotted capability keys (for example `orderBy.sentAt`,
+        `stringLookups.includes`). Consumers use this to hide sorting and
+        filtering affordances the backend cannot honour. Missing keys mean
+        "supported".
+      responses:
+        '200':
+          description: Capability map.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties:
+                      type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications:
+    get:
+      tags: [notifications]
+      summary: List notifications
+      description: |
+        Filters are combined with AND. String filters (`bodyTemplate`,
+        `subjectTemplate`, `contextName`) are matched with the most precise
+        lookup the backend supports: case-insensitive `includes` when available,
+        otherwise a case-insensitive exact match, otherwise a plain equality
+        match. Ordering defaults to `createdAt desc`, and is dropped when the
+        backend reports it cannot order by the requested field.
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/NotificationStatus'
+        - name: notificationType
+          in: query
+          schema:
+            $ref: '#/components/schemas/NotificationType'
+        - name: adapterUsed
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: userId
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: bodyTemplate
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: subjectTemplate
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: contextName
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: tenant
+          in: query
+          schema: { type: string, minLength: 1 }
+        - name: createdAtFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: createdAtTo
+          in: query
+          schema: { type: string, format: date-time }
+        - name: sentAtFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: sentAtTo
+          in: query
+          schema: { type: string, format: date-time }
+        - name: orderByField
+          in: query
+          schema:
+            type: string
+            enum: [sendAfter, sentAt, readAt, createdAt, updatedAt]
+        - name: orderByDirection
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/pending:
+    get:
+      tags: [notifications]
+      summary: List notifications awaiting send
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/future:
+    get:
+      tags: [notifications]
+      summary: List notifications scheduled for the future
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/one-off:
+    get:
+      tags: [notifications]
+      summary: List one-off notifications
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/notifications/{id}:
+    get:
+      tags: [notifications]
+      summary: Get one notification with its context payloads
+      description: |
+        Looks the id up as a user notification first, then as a one-off one.
+      parameters:
+        - $ref: '#/components/parameters/notificationId'
+      responses:
+        '200':
+          description: The notification.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/NotificationDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/notifications/{id}/preview:
+    get:
+      tags: [notifications]
+      summary: Render the notification's templates
+      description: |
+        Fetches the body and subject templates from the template source at the
+        commit SHA persisted with the notification, then renders them with the
+        stored context (or regenerates the context when none was stored).
+        Notifications that are still `PENDING_SEND` and have no stored SHA fall
+        back to the current `main` commit.
+      parameters:
+        - $ref: '#/components/parameters/notificationId'
+      responses:
+        '200':
+          description: Rendered templates.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/NotificationPreview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            No commit SHA is available for this notification, so its templates
+            cannot be resolved (`PREVIEW_UNAVAILABLE`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: The template source could not be reached (`UPSTREAM_ERROR`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/notifications/{id}/resend:
+    post:
+      tags: [notifications]
+      summary: Resend a notification
+      description: |
+        Creates a new notification based on an existing one. Only user
+        notifications that have already been sent or failed can be resent.
+      parameters:
+        - $ref: '#/components/parameters/notificationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                useStoredContext:
+                  type: boolean
+                  default: false
+                  description: |
+                    Reuse the context stored with the original notification
+                    instead of regenerating it from current data.
+      responses:
+        '201':
+          description: The newly created notification.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/UserNotification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            The notification cannot be resent — it does not exist, is a one-off
+            notification, or is scheduled for the future (`CONFLICT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/notifications/{id}/cancel:
+    post:
+      tags: [notifications]
+      summary: Cancel a pending notification
+      parameters:
+        - $ref: '#/components/parameters/notificationId'
+      responses:
+        '200':
+          description: The notification was cancelled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [id, status]
+                    properties:
+                      id: { type: string }
+                      status:
+                        $ref: '#/components/schemas/NotificationStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The notification is not in `PENDING_SEND` status (`CONFLICT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        Shared secret configured as `VINTASEND_API_KEY`. The dashboard calls the
+        API from its server side only, so the key is never exposed to a browser.
+
+  parameters:
+    page:
+      name: page
+      in: query
+      description: 1-indexed page number.
+      schema: { type: integer, minimum: 1, default: 1 }
+    pageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    notificationId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    NotificationPage:
+      description: A page of notifications.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PaginatedNotifications'
+    BadRequest:
+      description: The request failed validation (`BAD_REQUEST`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: The API key is missing or wrong (`UNAUTHORIZED`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: No such notification (`NOT_FOUND`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    NotificationStatus:
+      type: string
+      enum: [PENDING_SEND, SENT, FAILED, READ, CANCELLED]
+
+    NotificationType:
+      type: string
+      enum: [EMAIL, SMS, PUSH, IN_APP]
+
+    NotificationAttachment:
+      type: object
+      required: [id, filename, contentType, size]
+      properties:
+        id: { type: string }
+        filename: { type: string }
+        contentType: { type: string }
+        size: { type: integer }
+        description: { type: string }
+
+    NotificationBase:
+      type: object
+      required:
+        - id
+        - kind
+        - notificationType
+        - title
+        - contextName
+        - status
+        - sendAfter
+        - sentAt
+        - readAt
+        - createdAt
+        - updatedAt
+        - adapterUsed
+        - bodyTemplate
+        - subjectTemplate
+        - gitCommitSha
+        - tenant
+      properties:
+        id: { type: string }
+        kind:
+          type: string
+          enum: [user, one-off]
+          description: Discriminates the two notification variants.
+        notificationType:
+          $ref: '#/components/schemas/NotificationType'
+        title:
+          type: [string, 'null']
+        contextName: { type: string }
+        status:
+          $ref: '#/components/schemas/NotificationStatus'
+        sendAfter:
+          type: [string, 'null']
+          format: date-time
+        sentAt:
+          type: [string, 'null']
+          format: date-time
+        readAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: [string, 'null']
+          format: date-time
+        updatedAt:
+          type: [string, 'null']
+          format: date-time
+        adapterUsed:
+          type: [string, 'null']
+        bodyTemplate: { type: string }
+        subjectTemplate:
+          type: [string, 'null']
+        gitCommitSha:
+          type: [string, 'null']
+        tenant:
+          type: [string, 'null']
+
+    UserNotification:
+      allOf:
+        - $ref: '#/components/schemas/NotificationBase'
+        - type: object
+          required: [userId]
+          properties:
+            kind:
+              type: string
+              enum: [user]
+            userId: { type: string }
+
+    OneOffNotification:
+      allOf:
+        - $ref: '#/components/schemas/NotificationBase'
+        - type: object
+          required: [emailOrPhone, firstName, lastName]
+          properties:
+            kind:
+              type: string
+              enum: [one-off]
+            emailOrPhone: { type: string }
+            firstName:
+              type: [string, 'null']
+            lastName:
+              type: [string, 'null']
+
+    Notification:
+      oneOf:
+        - $ref: '#/components/schemas/UserNotification'
+        - $ref: '#/components/schemas/OneOffNotification'
+      discriminator:
+        propertyName: kind
+        mapping:
+          user: '#/components/schemas/UserNotification'
+          one-off: '#/components/schemas/OneOffNotification'
+
+    NotificationDetailFields:
+      type: object
+      required: [contextUsed, contextParameters, extraParams, attachments]
+      properties:
+        contextUsed:
+          description: Context the notification was rendered with, when stored.
+          nullable: true
+        contextParameters:
+          description: Parameters used to generate the context.
+          nullable: true
+        extraParams:
+          nullable: true
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationAttachment'
+
+    NotificationDetail:
+      oneOf:
+        - allOf:
+            - $ref: '#/components/schemas/UserNotification'
+            - $ref: '#/components/schemas/NotificationDetailFields'
+        - allOf:
+            - $ref: '#/components/schemas/OneOffNotification'
+            - $ref: '#/components/schemas/NotificationDetailFields'
+
+    PaginatedNotifications:
+      type: object
+      required: [data, page, pageSize, hasMore]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        page: { type: integer }
+        pageSize: { type: integer }
+        hasMore:
+          type: boolean
+          description: |
+            True when the page came back full, meaning another page may exist.
+            Backends are not required to report a total count.
+
+    NotificationPreview:
+      type: object
+      required:
+        - gitCommitSha
+        - bodyTemplatePath
+        - subjectTemplatePath
+        - renderedBodyHtml
+        - renderedSubjectHtml
+      properties:
+        gitCommitSha: { type: string }
+        bodyTemplatePath: { type: string }
+        subjectTemplatePath:
+          type: [string, 'null']
+        renderedBodyHtml: { type: string }
+        renderedSubjectHtml: { type: string }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - BAD_REQUEST
+                - UNAUTHORIZED
+                - NOT_FOUND
+                - CONFLICT
+                - PREVIEW_UNAVAILABLE
+                - UPSTREAM_ERROR
+                - INTERNAL_ERROR
+            message: { type: string }
+            details:
+              description: Optional machine-readable context, such as field issues.

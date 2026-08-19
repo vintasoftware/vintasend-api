@@ -1,0 +1,12 @@
+.env
+.venv/
+db.sqlite3
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# The real service factory is a deployment concern, not something this repo ships.
+# Start from vintasend_api/vintasend_config.example.py.
+vintasend_api/vintasend_config.py
