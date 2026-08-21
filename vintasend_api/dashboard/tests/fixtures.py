@@ -53,6 +53,8 @@ def make_user_notification(**overrides: Any) -> Notification:
         "adapter_extra_parameters": None,
         "tenant": "tenant-1",
         "git_commit_sha": "abc123",
+        "requested_template_version": 3,
+        "used_template_version": 3,
         "attachments": [],
     }
     defaults.update(overrides)
@@ -82,6 +84,8 @@ def make_one_off_notification(**overrides: Any) -> OneOffNotification:
             "adapter_extra_parameters",
             "tenant",
             "git_commit_sha",
+            "requested_template_version",
+            "used_template_version",
             "attachments",
         )
     }

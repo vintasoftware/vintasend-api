@@ -79,6 +79,15 @@ class NotificationBaseOut(Schema):
     bodyTemplate: str
     subjectTemplate: str | None
     gitCommitSha: str | None
+    # Which version of `bodyTemplate` this notification asked for and which one actually
+    # went out. Both are `null` unless the service renders through a versioning template
+    # renderer -- a file-based renderer has no versions to report, and neither does a
+    # notification created before pinning existed. `requestedTemplateVersion` is what was
+    # pinned at create/update time (or left unpinned as `null`, meaning "whatever is current
+    # at send time"); `usedTemplateVersion` is what the renderer reported after the send,
+    # and is the only record of which version an unpinned notification rendered.
+    requestedTemplateVersion: int | None
+    usedTemplateVersion: int | None
     tenant: str | None
 
 

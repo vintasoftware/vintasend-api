@@ -42,6 +42,12 @@ class NotificationListQuery(PaginationQuery):
     subjectTemplate: str | None = None
     contextName: str | None = None
     tenant: str | None = None
+    # Template versions are integers, so `ge=0` rejects a negative outright rather than
+    # serving an empty page for it. The floor is 0 and not 1 deliberately: version numbering
+    # is the template renderer's business, and this API has no basis for assuming it is
+    # 1-based.
+    requestedTemplateVersion: int | None = Field(None, ge=0)
+    usedTemplateVersion: int | None = Field(None, ge=0)
     createdAtFrom: datetime.datetime | None = None
     createdAtTo: datetime.datetime | None = None
     sentAtFrom: datetime.datetime | None = None

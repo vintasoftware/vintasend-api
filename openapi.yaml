@@ -83,8 +83,10 @@ paths:
         `subjectTemplate`, `contextName`) are matched with the most precise
         lookup the backend supports: case-insensitive `includes` when available,
         otherwise a case-insensitive exact match, otherwise a plain equality
-        match. Ordering defaults to `createdAt desc`, and is dropped when the
-        backend reports it cannot order by the requested field.
+        match. The template-version filters match exactly and never match a
+        notification whose version is null. Ordering defaults to `createdAt desc`,
+        and is dropped when the backend reports it cannot order by the requested
+        field.
       parameters:
         - $ref: '#/components/parameters/page'
         - $ref: '#/components/parameters/pageSize'
@@ -114,6 +116,18 @@ paths:
         - name: tenant
           in: query
           schema: { type: string, minLength: 1 }
+        - name: requestedTemplateVersion
+          in: query
+          description: >-
+            Notifications pinned to this template version. Unpinned notifications never
+            match, since a null version is not version zero.
+          schema: { type: integer, minimum: 0 }
+        - name: usedTemplateVersion
+          in: query
+          description: >-
+            Notifications that rendered this template version. Notifications that have not
+            been sent, and those whose renderer has no versions, never match.
+          schema: { type: integer, minimum: 0 }
         - name: createdAtFrom
           in: query
           schema: { type: string, format: date-time }
@@ -422,6 +436,8 @@ components:
         - bodyTemplate
         - subjectTemplate
         - gitCommitSha
+        - requestedTemplateVersion
+        - usedTemplateVersion
         - tenant
       properties:
         id: { type: string }
@@ -458,6 +474,18 @@ components:
           type: [string, 'null']
         gitCommitSha:
           type: [string, 'null']
+        requestedTemplateVersion:
+          type: [integer, 'null']
+          description: >-
+            The template version this notification asked for, pinned when it was created or
+            updated. Null means it was left unpinned and renders whatever version is current
+            at send time. Always null when the service's template renderer has no versions.
+        usedTemplateVersion:
+          type: [integer, 'null']
+          description: >-
+            The template version the renderer reported after the notification was sent. Null
+            until it has been sent, and always null when the template renderer has no
+            versions. On an unpinned notification this is the only record of what went out.
         tenant:
           type: [string, 'null']
 

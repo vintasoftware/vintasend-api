@@ -16,7 +16,7 @@ which backend holds the notifications.
 
 The imports below are illustrative -- install the implementation packages your deployment
 actually uses (``vintasend-django``, ``vintasend-sqlalchemy``, ``vintasend-fastapi-mail``,
-``vintasend-flask-mail``, ``vintasend-jinja``, ``vintasend-s3-attachments``, ...).
+``vintasend-flask-mail``, ``vintasend-jinja``, ``vintasend-aws-s3-attachments``, ...).
 """
 
 from typing import Any

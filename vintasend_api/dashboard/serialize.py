@@ -117,6 +117,8 @@ def _shared_fields(notification: AnyNotification) -> dict[str, Any]:
         "bodyTemplate": notification.body_template,
         "subjectTemplate": notification.subject_template,
         "gitCommitSha": notification.git_commit_sha,
+        "requestedTemplateVersion": notification.requested_template_version,
+        "usedTemplateVersion": notification.used_template_version,
         "tenant": notification.tenant,
     }
 

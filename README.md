@@ -71,7 +71,54 @@ Conventions the dashboard depends on:
 - List rows carry a `kind` field (`user` or `one-off`) so clients can discriminate
   without sniffing for the presence of fields.
 - Timestamps are ISO-8601 UTC strings, `null` when unset — never absent.
+- Every notification payload carries `requestedTemplateVersion` and `usedTemplateVersion`,
+  which are `null` for a service whose template renderer has no versions. See
+  [Template versions](#template-versions).
 - Errors always use the envelope `{ "error": { "code", "message", "details"? } }`.
+
+## Template versions
+
+A notification records which version of its template it renders, for services whose
+template renderer versions templates at all — a store-backed one such as
+[`vintasend-managed-templates`](https://github.com/vintasoftware/vintasend-managed-templates).
+Two fields on every notification payload say it:
+
+| Field | Written | Means |
+| --- | --- | --- |
+| `requestedTemplateVersion` | at create/update | The version this notification is pinned to. `null` is not "unknown": it means the notification was deliberately left unpinned and renders whatever version is current when it sends. |
+| `usedTemplateVersion` | after the send | What the renderer reported it actually used. `null` until the notification has been sent. |
+
+On a pinned notification the two read the same, and an edit to the template cannot change
+what it renders — that is what pinning is for. On an unpinned one they differ, and
+`usedTemplateVersion` is the only record of which version went out: by the time anyone
+asks, the template has moved on.
+
+Both are `null` for a file-based renderer, which has no versions to report, and for any
+notification created before pinning existed. A dashboard should read `null` as *not
+applicable* rather than as a missing value, and hide the field rather than showing a zero.
+
+This is independent of `gitCommitSha`, which pins the same idea for the other kind of
+renderer: templates as files in a repository. A notification uses one mechanism or the
+other, never both, so a payload with a `gitCommitSha` normally has null versions and one
+with versions normally has a null SHA.
+
+Both are filterable on the listing:
+
+```
+GET /api/v1/notifications?requestedTemplateVersion=3   # pinned to v3
+GET /api/v1/notifications?usedTemplateVersion=3        # actually rendered v3 — the audit query
+```
+
+They match exactly, and they never match a notification whose version is `null` — the
+library's NULL semantics, the same as every other filter field. So there is no way to ask
+for "the unpinned ones" positively; `not` is what includes them, and this API exposes no
+`not`. A negative version is a 400, but the floor is 0 rather than 1: version numbering
+belongs to the template renderer, and this API has no basis for assuming it is 1-based.
+
+A backend that cannot evaluate either filter reports `fields.requestedTemplateVersion` /
+`fields.usedTemplateVersion` as `false` in `/capabilities`, and the dashboard greys the
+control out. Unlike ordering, an unsupported *field* filter is not dropped server-side —
+that has always been this API's split, and these two follow it.
 
 ## Authentication
 
@@ -227,6 +274,14 @@ so that is one call here rather than two. Same outcome.
 Python, so this API resolves which context to render with — the stored one, or a
 regenerated one — before calling it. The TypeScript version passes either shape down into
 its service. Same outcome.
+
+**Template versions.** `requestedTemplateVersion` and `usedTemplateVersion` — both the
+payload fields and the two query parameters that filter on them — come from `vintasend`
+additions that `vintasend-ts` has not made, so the TypeScript reference serves the fields
+as `null` at best and omits them at worst, and ignores the filters, until it catches up.
+They are additive and nullable, so a dashboard reading them tolerantly works against
+either — but this is the one place where `openapi.yaml` is currently ahead of the
+TypeScript implementation rather than describing both.
 
 **`UPSTREAM_ERROR`.** `openapi.yaml` documents a 502 when the template source cannot be
 reached. This implementation emits it. The TypeScript reference declares the code but

@@ -10,3 +10,12 @@ __pycache__/
 # The real service factory is a deployment concern, not something this repo ships.
 # Start from vintasend_api/vintasend_config.example.py.
 vintasend_api/vintasend_config.py
+
+# tox build/test environments and coverage output
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+coverage-*.xml
+coverage.json
+htmlcov/

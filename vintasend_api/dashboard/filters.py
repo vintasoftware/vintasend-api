@@ -99,6 +99,13 @@ def build_backend_filter(
     if query.tenant:
         backend_filter["tenant"] = query.tenant
 
+    # Compared against None rather than tested for truthiness: version 0 is a legitimate
+    # value the query schema accepts, and `if query.requestedTemplateVersion:` would drop it.
+    if query.requestedTemplateVersion is not None:
+        backend_filter["requested_template_version"] = query.requestedTemplateVersion
+    if query.usedTemplateVersion is not None:
+        backend_filter["used_template_version"] = query.usedTemplateVersion
+
     if query.bodyTemplate:
         backend_filter["body_template"] = build_string_filter(query.bodyTemplate, capabilities)
     if query.subjectTemplate:

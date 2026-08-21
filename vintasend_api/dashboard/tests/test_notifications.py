@@ -403,6 +403,205 @@ def test_detail_404s_when_the_notification_does_not_exist(
     assert response.json()["error"]["code"] == "NOT_FOUND"
 
 
+# --- template versions ---------------------------------------------------------------
+#
+# Which version of a template a notification renders is a property of the notification,
+# not of the template store: `requestedTemplateVersion` is what was pinned when it was
+# created or updated, `usedTemplateVersion` is what the renderer reported once it went
+# out. Both are null for a service whose renderer has no versions, which is every
+# file-based one -- so the dashboard has to treat null as "not applicable", not as zero.
+
+
+def test_list_rows_carry_the_template_versions(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    install_service(FakeService(filter_results=[make_user_notification()]))
+
+    row = get("/api/v1/notifications").json()["data"][0]
+
+    assert row["requestedTemplateVersion"] == 3
+    assert row["usedTemplateVersion"] == 3
+
+
+def test_filtering_by_the_requested_template_version(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    service = install_service()
+
+    get("/api/v1/notifications?requestedTemplateVersion=3")
+
+    assert service.call_args("filter_notifications")[0] == {"requested_template_version": 3}
+
+
+def test_filtering_by_the_used_template_version(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    """The audit question: which notifications actually went out on version 3?"""
+    service = install_service()
+
+    get("/api/v1/notifications?usedTemplateVersion=3")
+
+    assert service.call_args("filter_notifications")[0] == {"used_template_version": 3}
+
+
+def test_the_two_version_filters_combine_with_the_rest(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    service = install_service()
+
+    get("/api/v1/notifications?tenant=acme&requestedTemplateVersion=2&usedTemplateVersion=3")
+
+    assert service.call_args("filter_notifications")[0] == {
+        "tenant": "acme",
+        "requested_template_version": 2,
+        "used_template_version": 3,
+    }
+
+
+def test_version_zero_is_forwarded_rather_than_dropped_as_falsy(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    """Version numbering belongs to the renderer, so 0 is a value and not an absence."""
+    service = install_service()
+
+    get("/api/v1/notifications?requestedTemplateVersion=0")
+
+    assert service.call_args("filter_notifications")[0] == {"requested_template_version": 0}
+
+
+def test_omitting_the_version_filters_leaves_them_out_of_the_backend_filter(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    service = install_service()
+
+    get("/api/v1/notifications")
+
+    assert service.call_args("filter_notifications")[0] == {}
+
+
+def test_rejects_a_negative_template_version_with_a_400(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    install_service()
+
+    response = get("/api/v1/notifications?usedTemplateVersion=-1")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "BAD_REQUEST"
+
+
+def test_rejects_a_non_numeric_template_version_with_a_400(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    install_service()
+
+    response = get("/api/v1/notifications?requestedTemplateVersion=latest")
+
+    assert response.status_code == 400
+
+
+def test_a_backend_declining_the_version_fields_says_so_to_the_dashboard(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    """`fields.*` reaches the dashboard untouched, which is how it greys the control out.
+
+    This API does not drop an unsupported field filter server-side -- it does that only for
+    ordering -- so a backend that cannot evaluate these publishes the fact and the UI is
+    what stops offering them.
+    """
+    install_service(
+        FakeService(
+            capabilities={
+                "fields.requestedTemplateVersion": False,
+                "fields.usedTemplateVersion": False,
+            }
+        )
+    )
+
+    capabilities = get("/api/v1/capabilities").json()["data"]
+
+    assert capabilities["fields.requestedTemplateVersion"] is False
+    assert capabilities["fields.usedTemplateVersion"] is False
+
+
+def test_the_detail_payload_carries_them_too(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    install_service(FakeService(notification=make_user_notification()))
+
+    body = get("/api/v1/notifications/notif-1").json()
+
+    assert body["data"]["requestedTemplateVersion"] == 3
+    assert body["data"]["usedTemplateVersion"] == 3
+
+
+def test_one_off_notifications_carry_them_as_well(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    install_service(FakeService(notification=make_one_off_notification()))
+
+    body = get("/api/v1/notifications/oneoff-1").json()
+
+    assert body["data"]["requestedTemplateVersion"] == 3
+    assert body["data"]["usedTemplateVersion"] == 3
+
+
+def test_an_unpinned_notification_reports_only_what_it_rendered(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    """No version was asked for, so the renderer took the latest -- and said which."""
+    install_service(
+        FakeService(
+            notification=make_user_notification(
+                requested_template_version=None, used_template_version=7
+            )
+        )
+    )
+
+    body = get("/api/v1/notifications/notif-1").json()
+
+    assert body["data"]["requestedTemplateVersion"] is None
+    assert body["data"]["usedTemplateVersion"] == 7
+
+
+def test_a_notification_that_has_not_been_sent_has_no_used_version_yet(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    install_service(
+        FakeService(
+            notification=make_user_notification(
+                status="PENDING_SEND",
+                sent_at=None,
+                requested_template_version=3,
+                used_template_version=None,
+            )
+        )
+    )
+
+    body = get("/api/v1/notifications/notif-1").json()
+
+    assert body["data"]["requestedTemplateVersion"] == 3
+    assert body["data"]["usedTemplateVersion"] is None
+
+
+def test_a_service_whose_renderer_has_no_versions_reports_null_rather_than_omitting(
+    get: Callable[..., Any], install_service: Callable[..., FakeService]
+) -> None:
+    """The fields are always present -- the contract has no optional keys here."""
+    install_service(
+        FakeService(
+            filter_results=[
+                make_user_notification(requested_template_version=None, used_template_version=None)
+            ]
+        )
+    )
+
+    row = get("/api/v1/notifications").json()["data"][0]
+
+    assert row["requestedTemplateVersion"] is None
+    assert row["usedTemplateVersion"] is None
+
+
 # --- GET /api/v1/notifications/{id}/preview ------------------------------------------
 
 
