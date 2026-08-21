@@ -1,13 +1,13 @@
 [project]
 name = "vintasend-api"
-version = "0.1.0"
+version = "3.0.0"
 description = "REST API that exposes a VintaSend notification service over HTTP for the VintaSend dashboard UI"
 authors = [{ name = "Vinta Software", email = "contact@vinta.com.br" }]
 license = "MIT"
 readme = "README.md"
 # Bounded above by Django rather than by vintasend (which supports 3.14):
 # the Django 5.2 LTS line tops out at 3.13.
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10,<3.15"
 # Constraints stay under [tool.poetry.dependencies] to keep caret syntax, which
 # is not valid PEP 621. 'dynamic' tells build tooling the real list lives there.
 dynamic = ["dependencies"]
@@ -16,7 +16,7 @@ dynamic = ["dependencies"]
 package-mode = false
 
 [tool.poetry.dependencies]
-vintasend = { path = "../..", develop = true }
+vintasend = "3.0.0"
 django = ">=4.2,<6.0"
 django-ninja = "^1.4.3"
 requests = "^2.34.2"
