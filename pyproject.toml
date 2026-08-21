@@ -1,6 +1,6 @@
 [project]
 name = "vintasend-api"
-version = "3.0.0"
+version = "3.1.0"
 description = "REST API that exposes a VintaSend notification service over HTTP for the VintaSend dashboard UI"
 authors = [{ name = "Vinta Software", email = "contact@vinta.com.br" }]
 license = "MIT"
@@ -16,7 +16,7 @@ dynamic = ["dependencies"]
 package-mode = false
 
 [tool.poetry.dependencies]
-vintasend = "3.0.0"
+vintasend = "3.1.0"
 django = ">=4.2,<6.0"
 django-ninja = "^1.4.3"
 requests = "^2.34.2"
