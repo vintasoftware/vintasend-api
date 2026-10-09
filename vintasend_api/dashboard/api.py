@@ -4,14 +4,15 @@ Each handler maps HTTP input to a VintaSend service call and the result back to 
 contract -- no business logic beyond the translation itself.
 """
 
-import logging
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from ninja import NinjaAPI, Query, Status
-from ninja.errors import AuthenticationError, ValidationError
+from ninja.errors import AuthenticationError, HttpError, ValidationError
 
 from .auth import ApiKeyAuth
+from .bodies import JsonBodyParser, refuse_an_empty_json_body
 from .contract import (
     API_VERSION,
     ApiErrorResponse,
@@ -24,8 +25,9 @@ from .contract import (
     PaginatedResponse,
     UserNotificationOut,
 )
-from .errors import STATUS_BY_CODE, ApiError
+from .errors import STATUS_BY_CODE, ApiError, invalid_request, issue
 from .filters import build_backend_filter, build_order_by
+from .hooks import REQUEST_ID_HEADER, report_unhandled_error, request_id_for
 from .preview import build_notification_preview
 from .query import NotificationListQuery, PaginationQuery, ResendBody
 from .serialize import (
@@ -39,24 +41,26 @@ from .service import ServiceCaller, get_service_caller
 from .template_source import get_template_client
 
 
-logger = logging.getLogger(__name__)
-
 NotificationPage = PaginatedResponse[NotificationOut]
 
 # Error responses are produced by the exception handlers below rather than returned from
 # a view, so they are declared purely so the generated schema documents them the way
-# `openapi.yaml` does. Each route declares the subset the contract lists for it.
-LIST_ERRORS: dict[int, Any] = {400: ApiErrorResponse, 401: ApiErrorResponse}
-LOOKUP_ERRORS: dict[int, Any] = {401: ApiErrorResponse, 404: ApiErrorResponse}
+# `openapi.yaml` does. Each route declares the subset the contract lists for it, and a test
+# pins the two together.
+#
+# Every authenticated route can refuse the caller twice over: 401 when no valid credential
+# was presented, 403 (FORBIDDEN) when a host authenticated the caller and then refused it.
+AUTH_ERRORS: dict[int, Any] = {401: ApiErrorResponse, 403: ApiErrorResponse}
+LIST_ERRORS: dict[int, Any] = {400: ApiErrorResponse, **AUTH_ERRORS}
+LOOKUP_ERRORS: dict[int, Any] = {**AUTH_ERRORS, 404: ApiErrorResponse}
 PREVIEW_ERRORS: dict[int, Any] = {
-    401: ApiErrorResponse,
-    404: ApiErrorResponse,
+    **LOOKUP_ERRORS,
     409: ApiErrorResponse,
     502: ApiErrorResponse,
 }
 RESEND_ERRORS: dict[int, Any] = {
     400: ApiErrorResponse,
-    401: ApiErrorResponse,
+    **AUTH_ERRORS,
     409: ApiErrorResponse,
 }
 # The request body is optional, so an omitted one falls back to this. Shared rather
@@ -64,8 +68,7 @@ RESEND_ERRORS: dict[int, Any] = {
 DEFAULT_RESEND_BODY = ResendBody(useStoredContext=False)
 
 CANCEL_ERRORS: dict[int, Any] = {
-    401: ApiErrorResponse,
-    404: ApiErrorResponse,
+    **LOOKUP_ERRORS,
     409: ApiErrorResponse,
 }
 
@@ -78,6 +81,8 @@ api = NinjaAPI(
     ),
     urls_namespace="vintasend_api",
     auth=ApiKeyAuth(),
+    # Reads a body under the contract's media-type rule; see `bodies.py`.
+    parser=JsonBodyParser(),
     # The contract's own envelope is emitted by the handlers below, so Ninja's default
     # 404/validation bodies are never used.
     docs_url="/docs",
@@ -120,13 +125,13 @@ def handle_validation_error(request: HttpRequest, exc: ValidationError) -> HttpR
     the reported path is the field name the client actually sent.
     """
     issues = [
-        {
-            "path": ".".join(str(part) for part in _issue_path(issue.get("loc", ()))),
-            "message": issue.get("msg", ""),
-        }
-        for issue in exc.errors
+        issue(
+            ".".join(str(part) for part in _issue_path(failure.get("loc", ()))),
+            str(failure.get("msg", "")),
+        )
+        for failure in exc.errors
     ]
-    return _envelope(request, "BAD_REQUEST", "Invalid request.", {"issues": issues})
+    return handle_api_error(request, invalid_request(issues))
 
 
 def _issue_path(loc: Any) -> list[Any]:
@@ -140,6 +145,21 @@ def _issue_path(loc: Any) -> list[Any]:
     return parts
 
 
+@api.exception_handler(HttpError)
+def handle_http_error(request: HttpRequest, exc: HttpError) -> HttpResponse:
+    """Put Ninja's own refusals in the error envelope.
+
+    Ninja raises ``HttpError`` when it cannot read a request body, wrapping whatever the
+    parser raised. ``JsonBodyParser`` raises the contract's 400, so that is unwrapped and
+    answered as it stands. Any other 400 gets the same shape. Anything else is unexpected.
+    """
+    if isinstance(exc.__cause__, ApiError):
+        return handle_api_error(request, exc.__cause__)
+    if exc.status_code == 400:
+        return handle_api_error(request, invalid_request([issue("", str(exc))]))
+    return handle_unexpected_error(request, exc)
+
+
 @api.exception_handler(Http404)
 def handle_not_found(request: HttpRequest, exc: Http404) -> HttpResponse:
     return _envelope(
@@ -151,31 +171,52 @@ def handle_not_found(request: HttpRequest, exc: Http404) -> HttpResponse:
 
 @api.exception_handler(Exception)
 def handle_unexpected_error(request: HttpRequest, exc: Exception) -> HttpResponse:
-    """Log unexpected errors in full but report them generically, so backend internals
-    -- connection strings, credentials in driver messages -- never leak to a client."""
-    logger.exception("Unhandled error while handling %s %s", request.method, request.path)
-    return _envelope(
+    """Report unexpected errors generically, and never log them whole.
+
+    The client gets a fixed message, so backend internals -- connection strings, credentials
+    in driver messages -- never leak to it. The log gets one line by default: the error's
+    class, a request id, the method and the route pattern. An error from the notification
+    store, a provider or a context generator can carry notification content, recipients or
+    context values, which can be health data, so its message, its traceback and the concrete
+    path are not logged. A host that wants more sets ``VINTASEND_UNHANDLED_ERROR_HANDLER`` --
+    see ``hooks``. The response carries the request id in ``X-Request-Id``, to match a
+    client's report to the log line.
+    """
+    request_id = request_id_for(request)
+    report_unhandled_error(exc, request, request_id)
+    response = _envelope(
         request,
         "INTERNAL_ERROR",
         "An unexpected error occurred while handling the request.",
     )
+    response[REQUEST_ID_HEADER] = request_id
+    # Django logs every 5xx response again on ``django.request``, with the concrete path and
+    # the request object attached -- which mail_admins or an error tracker on the root logger
+    # turns into a report with request data. This error has been reported above, so that
+    # second record is suppressed.
+    response._has_been_logged = True  # type: ignore[attr-defined]
+    return response
 
 
 # --- helpers -------------------------------------------------------------------------
 
 
-def _paginate(notifications: list[AnyNotification], page: int, page_size: int) -> dict[str, Any]:
+def _paginate(
+    read: Callable[[int, int], Sequence[AnyNotification]], page: int, page_size: int
+) -> dict[str, Any]:
+    """One page of a listing, and whether the next page has a row.
+
+    Backends are not required to count, so that is asked directly: a full page is followed by
+    a one-row read of the first row after it, which is page ``page * page_size + 1`` of one-row
+    pages. A short page is the last one without asking. ``read`` takes the contract's
+    1-indexed pages; ``ServiceCaller`` converts them for the backend.
+    """
+    notifications = read(page, page_size)
+    has_more = len(notifications) == page_size and bool(read(page * page_size + 1, 1))
     data: list[ListNotificationOut] = [
         serialize_notification(notification) for notification in notifications
     ]
-    return {
-        "data": data,
-        "page": page,
-        "pageSize": page_size,
-        # True when the page came back full, meaning another page may exist. Backends
-        # are not required to report a total count.
-        "hasMore": len(data) == page_size,
-    }
+    return {"data": data, "page": page, "pageSize": page_size, "hasMore": has_more}
 
 
 def _find_notification(service: ServiceCaller, notification_id: str) -> AnyNotification:
@@ -190,7 +231,7 @@ def _find_notification(service: ServiceCaller, notification_id: str) -> AnyNotif
 
 @api.get(
     "/capabilities",
-    response={200: DataResponse[dict[str, bool]], 401: ApiErrorResponse},
+    response={200: DataResponse[dict[str, bool]], **AUTH_ERRORS},
     tags=["system"],
 )
 def get_capabilities(request: HttpRequest) -> dict[str, Any]:
@@ -216,14 +257,16 @@ def list_notifications(request: HttpRequest, query: Query[NotificationListQuery]
     # Page numbers stay in the contract's 1-indexed terms here. `ServiceCaller` converts
     # to whatever the configured backend uses, which it learns from the backend's own
     # `pagination.oneIndexed` capability rather than assuming.
-    notifications = service.filter_notifications(
-        build_backend_filter(query, capabilities),
+    backend_filter = build_backend_filter(query, capabilities)
+    order_by = build_order_by(query, capabilities)
+
+    return _paginate(
+        lambda page, page_size: service.filter_notifications(
+            backend_filter, page, page_size, order_by
+        ),
         query.page,
         query.pageSize,
-        build_order_by(query, capabilities),
     )
-
-    return _paginate(notifications, query.page, query.pageSize)
 
 
 @api.get(
@@ -235,8 +278,7 @@ def list_pending_notifications(
     request: HttpRequest, query: Query[PaginationQuery]
 ) -> dict[str, Any]:
     service = get_service_caller()
-    notifications = service.get_pending_notifications(query.page, query.pageSize)
-    return _paginate(notifications, query.page, query.pageSize)
+    return _paginate(service.get_pending_notifications, query.page, query.pageSize)
 
 
 @api.get(
@@ -248,8 +290,7 @@ def list_future_notifications(
     request: HttpRequest, query: Query[PaginationQuery]
 ) -> dict[str, Any]:
     service = get_service_caller()
-    notifications = service.get_future_notifications(query.page, query.pageSize)
-    return _paginate(notifications, query.page, query.pageSize)
+    return _paginate(service.get_future_notifications, query.page, query.pageSize)
 
 
 @api.get(
@@ -261,8 +302,7 @@ def list_one_off_notifications(
     request: HttpRequest, query: Query[PaginationQuery]
 ) -> dict[str, Any]:
     service = get_service_caller()
-    notifications = service.get_one_off_notifications(query.page, query.pageSize)
-    return _paginate(list(notifications), query.page, query.pageSize)
+    return _paginate(service.get_one_off_notifications, query.page, query.pageSize)
 
 
 @api.get(
@@ -299,6 +339,7 @@ def resend_notification(
     id: str,  # noqa: A002
     payload: ResendBody = DEFAULT_RESEND_BODY,
 ) -> Status:
+    refuse_an_empty_json_body(request)
     service = get_service_caller()
     resent = service.resend_notification(id, payload.useStoredContext)
 

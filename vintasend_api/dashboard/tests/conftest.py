@@ -13,6 +13,7 @@ import pytest
 
 from ..service import ServiceCaller, set_service_caller
 from ..template_source import set_template_client
+from .contract import undeclared_status
 from .fixtures import AUTH_HEADERS, FakeService, FakeTemplateClient
 
 
@@ -59,9 +60,28 @@ def install_template_client() -> Callable[..., FakeTemplateClient]:
     return _install
 
 
+class ContractClient(Client):
+    """A test client that fails a test on a response its operation does not declare.
+
+    The error statuses are declared by hand, route by route, in ``api.py``. A route that can
+    answer one it does not declare is a contract a generated client cannot handle -- and
+    nothing else notices, because the server still answers.
+    """
+
+    def request(self, **request: Any) -> Any:
+        response = super().request(**request)
+        match = response.wsgi_request.resolver_match
+        if match is not None and match.route:
+            problem = undeclared_status(
+                response.wsgi_request.method or "", match.route, response.status_code
+            )
+            assert problem is None, problem
+        return response
+
+
 @pytest.fixture
 def client() -> Client:
-    return Client()
+    return ContractClient()
 
 
 @pytest.fixture
