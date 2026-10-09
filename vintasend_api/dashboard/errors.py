@@ -52,7 +52,13 @@ class ApiError(Exception):
         return cls("BAD_REQUEST", message, {**context, "issues": listed})
 
     @classmethod
+    def unauthorized(cls, message: str) -> "ApiError":
+        """A 401: no valid credential was presented."""
+        return cls("UNAUTHORIZED", message)
+
+    @classmethod
     def forbidden(cls, message: str) -> "ApiError":
+        """A 403: the caller is known, and refused."""
         return cls("FORBIDDEN", message)
 
     @classmethod

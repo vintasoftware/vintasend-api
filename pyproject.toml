@@ -8,12 +8,55 @@ readme = "README.md"
 # Bounded above by Django rather than by vintasend (which supports 3.14):
 # the Django 5.2 LTS line tops out at 3.13.
 requires-python = ">=3.10,<3.15"
+keywords = ["vintasend", "notifications", "django", "django-ninja", "api"]
+# No "License ::" classifier: `license` is an SPDX expression (PEP 639), which supersedes
+# license classifiers, and the two together are an error to stricter tools and indexes.
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 4.2",
+    "Framework :: Django :: 5.0",
+    "Framework :: Django :: 5.1",
+    "Framework :: Django :: 5.2",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Typing :: Typed",
+]
 # Constraints stay under [tool.poetry.dependencies] to keep caret syntax, which
 # is not valid PEP 621. 'dynamic' tells build tooling the real list lives there.
 dynamic = ["dependencies"]
 
+[project.urls]
+Homepage = "https://github.com/vintasoftware/vintasend-api"
+Repository = "https://github.com/vintasoftware/vintasend-api"
+Issues = "https://github.com/vintasoftware/vintasend-api/issues"
+Changelog = "https://github.com/vintasoftware/vintasend/blob/main/RELEASE_NOTES.md"
+
 [tool.poetry]
-package-mode = false
+# One package: the embeddable app (vintasend_api.dashboard) and the bundled project that
+# runs it on its own (settings, urls, wsgi, asgi). manage.py stays out: it is a checkout
+# convenience, and an installed package runs Django's commands through
+# `python -m django --settings=vintasend_api.settings` instead.
+packages = [{ include = "vintasend_api" }]
+# The test suite runs from a checkout and is no use to a host, so neither distribution
+# carries it.
+exclude = ["vintasend_api/**/tests", "vintasend_api/**/tests/**"]
+# openapi.yaml goes in the sdist, with the source it describes, and not in the wheel.
+# Nothing reads it at runtime: the routes declare their responses themselves and Ninja
+# serves the schema it generates from them at /api/v1/openapi.json. A wheel can only carry
+# it inside the package directory (anywhere else lands loose in site-packages), and the
+# copy in the repository root has to stay where it is, byte-identical to the TypeScript
+# reference's.
+include = [{ path = "openapi.yaml", format = "sdist" }]
 
 [tool.poetry.dependencies]
 vintasend = "3.4.0"
@@ -39,7 +82,8 @@ django-stubs = "^5.2.0"
 types-requests = "^2.32.0"
 
 [build-system]
-requires = ["poetry-core"]
+# 2.0 is the first poetry-core to read the PEP 621 [project] table.
+requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]

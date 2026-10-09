@@ -15,6 +15,7 @@ from .auth import ApiKeyAuth
 from .bodies import JsonBodyParser, refuse_an_empty_json_body
 from .contract import (
     API_VERSION,
+    URLS_NAMESPACE,
     ApiErrorResponse,
     CancelledNotificationOut,
     DataResponse,
@@ -79,7 +80,8 @@ api = NinjaAPI(
         "HTTP contract between a VintaSend notification service and the VintaSend "
         "dashboard UI. openapi.yaml in the repository root is the source of truth."
     ),
-    urls_namespace="vintasend_api",
+    # Unique, so the templates management API can be mounted beside it. See contract.py.
+    urls_namespace=URLS_NAMESPACE,
     auth=ApiKeyAuth(),
     # Reads a body under the contract's media-type rule; see `bodies.py`.
     parser=JsonBodyParser(),
@@ -108,10 +110,11 @@ def handle_api_error(request: HttpRequest, exc: ApiError) -> HttpResponse:
 
 @api.exception_handler(AuthenticationError)
 def handle_authentication_error(request: HttpRequest, exc: AuthenticationError) -> HttpResponse:
-    """Covers a missing or non-bearer ``Authorization`` header.
+    """A safety net for Ninja's own authentication failure.
 
-    A wrong key never reaches here -- ``ApiKeyAuth`` raises ``ApiError`` itself -- but a
-    header Ninja cannot parse as a bearer token is rejected before the auth class runs.
+    ``ApiKeyAuth`` refuses every caller by raising ``ApiError`` itself -- a missing or
+    non-bearer header as much as a wrong key -- and a host's authenticator does the same, so
+    Ninja only raises this if an auth callable returns nothing. It still gets the envelope.
     """
     return _envelope(request, "UNAUTHORIZED", "A valid API key is required.")
 

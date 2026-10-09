@@ -1,4 +1,9 @@
-"""Django settings for the VintaSend dashboard API.
+"""Django settings for running the VintaSend dashboard API on its own.
+
+A host project that embeds the app does not use this module: it installs
+``vintasend_api.dashboard`` and sets the ``VINTASEND_*`` settings it needs in its own
+settings (see the README). This module is for the standalone deployment,
+``DJANGO_SETTINGS_MODULE=vintasend_api.settings``.
 
 This is a deliberately thin Django project. It has no models, no migrations, no admin
 and no user accounts: every notification it serves comes from whichever VintaSend
@@ -15,16 +20,19 @@ from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 
 
+# The repository root in a checkout. Not where an installed package keeps anything: that is
+# site-packages, so nothing the deployment owns is looked up relative to it.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Development convenience only. Production deployments set real environment variables,
-# and a missing .env is not an error.
+# and a missing .env is not an error. Read from the working directory, where the deployment
+# runs, rather than from beside this file, which for an installed package is site-packages.
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - python-dotenv is an optional convenience
     pass
 else:
-    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(Path.cwd() / ".env")
 
 
 def _env(name: str, default: str = "") -> str:
@@ -79,7 +87,8 @@ MIDDLEWARE = [
 DATABASES = {
     "default": {
         "ENGINE": _env("DJANGO_DB_ENGINE") or "django.db.backends.sqlite3",
-        "NAME": _env("DJANGO_DB_NAME") or str(BASE_DIR / "db.sqlite3"),
+        # The working directory, like .env: never inside site-packages.
+        "NAME": _env("DJANGO_DB_NAME") or str(Path.cwd() / "db.sqlite3"),
         "USER": _env("DJANGO_DB_USER"),
         "PASSWORD": _env("DJANGO_DB_PASSWORD"),
         "HOST": _env("DJANGO_DB_HOST"),
@@ -105,6 +114,11 @@ LOGGING = {
 
 # Shared secret every /api/v1 request must present as `Authorization: Bearer <key>`.
 VINTASEND_API_KEY = _env("VINTASEND_API_KEY")
+
+# Optional. Dotted path to a callable `(request) -> None` that authenticates callers instead
+# of the shared key, raising ApiError("UNAUTHORIZED"/"FORBIDDEN") to refuse one. See
+# dashboard/auth.py.
+VINTASEND_API_AUTHENTICATOR = _env("VINTASEND_API_AUTHENTICATOR")
 
 # Browser origins allowed to call the API. Empty means "server-side clients only",
 # which is how the dashboard uses it.

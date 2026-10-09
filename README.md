@@ -8,7 +8,7 @@ It exists so the [VintaSend dashboard](https://github.com/vintasoftware/vintasen
 no longer has to embed a notification service: the dashboard is a pure API client, and
 any implementation of this contract can serve it.
 
-**[`openapi.yaml`](./openapi.yaml) is the contract.** It is shipped here byte-identical
+**[`openapi.yaml`](https://github.com/vintasoftware/vintasend-api/blob/main/openapi.yaml) is the contract.** It is shipped here byte-identical
 to the copy in [`vintasend-ts-api`](https://github.com/vintasoftware/vintasend-ts-api),
 the TypeScript reference implementation. This project is the Python implementation of the
 same document, so one dashboard consumes either without knowing which is behind it.
@@ -132,7 +132,7 @@ that has always been this API's split, and these two follow it.
 
 ## Authentication
 
-Every `/api/v1` request must carry the shared secret:
+By default, every `/api/v1` request must carry the shared secret:
 
 ```
 Authorization: Bearer $VINTASEND_API_KEY
@@ -142,7 +142,168 @@ The dashboard calls this API only from its own server side, so the key never rea
 browser. If you do need to call the API from a browser, set `VINTASEND_API_CORS_ORIGINS`
 to the allowed origins — and put a per-user auth layer in front of it first.
 
+A host that authenticates callers itself sets `VINTASEND_API_AUTHENTICATOR` instead. See
+[Authenticating callers yourself](#authenticating-callers-yourself).
+
+## Installing and embedding
+
+```bash
+pip install vintasend-api
+```
+
+The package is a Django app, `vintasend_api.dashboard`, plus a project that runs it on its
+own (see [Running it on its own](#running-it-on-its-own)). A Django project of yours can
+serve the API itself: install the app and include its URLs under a prefix.
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    # ...
+    "vintasend_api.dashboard",
+]
+
+NOTIFICATION_SERVICE_FACTORY = "myproject.notifications.create_notification_service"
+VINTASEND_API_AUTHENTICATOR = "myproject.notifications_auth.authenticate"
+```
+
+```python
+# urls.py
+from django.urls import include, path
+
+urlpatterns = [
+    # ...
+    path("notifications-api/", include("vintasend_api.dashboard.urls")),
+]
+```
+
+That serves `/notifications-api/health` and everything under `/notifications-api/api/v1/`.
+The app's own namespace is `vintasend_api`, so `reverse("vintasend_api:api-root")` finds the
+API wherever it is mounted, and a project can mount
+[`vintasend-templates-management-api`](https://github.com/vintasoftware/vintasend-templates-management-api)
+beside it without the two colliding. Include the URLconf once per project: a second
+include registers the same namespaces again, and `reverse` only ever finds one of them. The
+app has no models and no migrations. It needs nothing from the bundled project: not its
+settings module, its `handler404` or its middleware.
+
+The app reads these settings, each at the moment it is used, so `override_settings` works
+on them. Every one the host leaves out falls back to the default shown.
+
+| Setting | Required | Default | Description |
+| --- | --- | --- | --- |
+| `NOTIFICATION_SERVICE_FACTORY` | yes | — | Dotted path to the callable building your VintaSend service. See [Configuring your VintaSend service](#configuring-your-vintasend-service). |
+| `VINTASEND_API_AUTHENTICATOR` | this or the key | unset | Callable `(request) -> None`, or its dotted path, that authenticates callers. When set, the key is not checked. |
+| `VINTASEND_API_KEY` | this or the authenticator | `""` | Shared secret callers send as a bearer token. Only read when no authenticator is set. |
+| `VINTASEND_BACKEND_IDENTIFIER` | no | `None` | Read from a non-primary backend registered in your service. |
+| `VINTASEND_UNHANDLED_ERROR_HANDLER` | no | unset | Callable `(exc, request, request_id)`, or its dotted path, receiving every unexpected error. See [Unexpected errors](#unexpected-errors). |
+| `VINTASEND_API_CORS_ORIGINS` | no | `()` | Browser origins allowed to call the API. Only read by the optional CORS middleware. |
+| `GITHUB_REPO` / `GITHUB_API_KEY` | preview only | `""` | Repository holding the templates, and a token with read access to it. |
+| `GITHUB_API_BASE_URL` | no | `https://api.github.com` | GitHub API root. |
+| `GITHUB_TEMPLATES_BASE_PATH` | no | `""` | Prefix added to template paths before the GitHub lookup. |
+| `GITHUB_TEMPLATE_CACHE_MAX_ENTRIES` | no | `100` | Template files kept in memory per process. |
+| `GITHUB_TEMPLATE_TIMEOUT_SECONDS` | no | `10` | Timeout of each GitHub request. |
+
+`manage.py check` reports a missing service factory, a missing key when no authenticator is
+set, and an authenticator or error handler that cannot be imported. See
+[Environment variables](#environment-variables) for the check IDs.
+
+### Authenticating callers yourself
+
+`VINTASEND_API_AUTHENTICATOR` runs before every `/api/v1` route, in place of the shared key.
+It refuses a caller by raising `ApiError.unauthorized(...)` when no valid credential was
+presented, and `ApiError.forbidden(...)` when it knows who is calling and refuses them: a
+401 would tell a signed-in user to sign in again. Both answer in the contract's error
+envelope. Returning lets the request through. It may be `async`. It mirrors the TypeScript
+reference's `authenticate` option.
+
+`bearer_token(request)` reads the token of an `Authorization: Bearer` header, matching the
+scheme in any case, and is `None` when the request carries none:
+
+```python
+# myproject/notifications_auth.py
+from django.http import HttpRequest
+
+from vintasend_api.dashboard.auth import ApiError, bearer_token
+
+from myproject.identity import verify_access_token  # your own
+
+
+def authenticate(request: HttpRequest) -> None:
+    token = bearer_token(request)
+    claims = verify_access_token(token) if token else None
+    if claims is None:
+        raise ApiError.unauthorized("Sign in first.")
+    if "notifications:manage" not in claims.scopes:
+        raise ApiError.forbidden("Not allowed.")
+```
+
+Give the setting as a dotted path. Assigning the function itself also works, but importing
+it into `settings.py` imports django-ninja while the settings are still being defined, and
+django-ninja reads its own `NINJA_*` settings at import: any defined further down are missed.
+
+Raise `ApiError`, which `vintasend_api.dashboard.auth` re-exports. The setting has the same
+name and shape in `vintasend-templates-management-api`, so a project mounting both can point
+them at one function, and that function may raise either package's `ApiError`: a refusal is
+recognised by its class name and its code, as the TypeScript packages do, not by its class.
+Only `UNAUTHORIZED` and `FORBIDDEN` count as a refusal; an `ApiError` with any other code, like
+any other exception, is an unexpected error and answers 500.
+
+`check_api_key(request)` in the same module is the shared-key check the app runs when no
+authenticator is set, for an authenticator that still accepts the key, such as from a
+server-side caller.
+
+An authenticator that cannot be imported does not fall back to the key: every request is
+answered with a 500 until it is fixed, and `manage.py check` reports it as
+`vintasend_api.E004`.
+
+Prefer a credential the caller sends explicitly, like the bearer token above. The API's views
+are CSRF-exempt, as a bearer-token API's are, so an authenticator that trusts the session
+cookie leaves the resend and cancel routes open to cross-site request forgery.
+
+### Optional extras
+
+Two things the bundled project sets up that a host may want too:
+
+- **CORS.** Add `"vintasend_api.dashboard.cors.CorsMiddleware"` to `MIDDLEWARE` and list the
+  origins in `VINTASEND_API_CORS_ORIGINS` to let browsers call the API. It applies to the
+  API's routes only, under whatever prefix they are mounted. Without it, the host's own CORS
+  handling applies, or none.
+- **The 404 envelope.** Within the API's routes, errors use the contract's envelope. A path
+  that matches no route at all is answered by the project's `handler404`, which in the
+  bundled project is `vintasend_api.dashboard.views.envelope_404`. A host can set it too,
+  but it then answers every unmatched path in the host's project in that shape.
+
+## Running it on its own
+
+The package also carries a complete Django project for a deployment with no Django project of
+its own. It is configured from environment variables, read from a `.env` file in the working
+directory when there is one.
+
+```bash
+pip install vintasend-api gunicorn
+```
+
+Write the factory building your service in a module of your own, say `vintasend_config.py`
+in the working directory, and point `NOTIFICATION_SERVICE_FACTORY` at it (see
+[Configuring your VintaSend service](#configuring-your-vintasend-service)). Then check the
+configuration and serve:
+
+```bash
+export DJANGO_SETTINGS_MODULE=vintasend_api.settings
+export NOTIFICATION_SERVICE_FACTORY=vintasend_config.create_notification_service
+export VINTASEND_API_KEY=...   # or VINTASEND_API_AUTHENTICATOR
+
+python -m django check
+gunicorn vintasend_api.wsgi:application --bind 0.0.0.0:3333
+```
+
+gunicorn is not a dependency of the package, so install it, or another WSGI server, yourself.
+An ASGI server can serve `vintasend_api.asgi:application` instead. The routes are at the root:
+`/health` and `/api/v1/`. See [Environment variables](#environment-variables) for the rest of
+the configuration.
+
 ## Getting started
+
+From a checkout, for development:
 
 ```bash
 poetry install
@@ -177,8 +338,9 @@ def create_notification_service():
     )
 ```
 
-Start from [`vintasend_api/vintasend_config.example.py`](./vintasend_api/vintasend_config.example.py),
-copying it to `vintasend_api/vintasend_config.py` (gitignored). The factory is called
+In a checkout, start from [`vintasend_api/vintasend_config.example.py`](https://github.com/vintasoftware/vintasend-api/blob/main/vintasend_api/vintasend_config.example.py),
+copying it to `vintasend_api/vintasend_config.py` (gitignored). Installed, put it in a module
+of your own anywhere on the Python path. The factory is called
 once per process and its result reused, so it must be safe to call once and the service
 it returns must be safe to share across requests.
 
@@ -195,7 +357,8 @@ which backend holds the notifications.
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `VINTASEND_API_KEY` | yes | Shared secret clients must send as a bearer token. |
+| `VINTASEND_API_KEY` | unless an authenticator is set | Shared secret clients must send as a bearer token. |
+| `VINTASEND_API_AUTHENTICATOR` | no | Dotted path to a callable `(request)` authenticating callers in place of the key. See [Authenticating callers yourself](#authenticating-callers-yourself). |
 | `NOTIFICATION_SERVICE_FACTORY` | yes | Dotted path to the callable building your VintaSend service. |
 | `VINTASEND_BACKEND_IDENTIFIER` | no | Read from a non-primary backend registered in your service. |
 | `VINTASEND_UNHANDLED_ERROR_HANDLER` | no | Dotted path to a callable `(exc, request, request_id)` receiving every unexpected error. See [Unexpected errors](#unexpected-errors). |
@@ -211,10 +374,13 @@ which backend holds the notifications.
 The `GITHUB_*` variables are only read when `/preview` is called, so the API runs fine
 without them if you do not use template previews.
 
-The first two are enforced by a Django system check, so a deployment missing either
-fails on `manage.py check` and on `runserver` rather than on the first request. So is a
-`VINTASEND_UNHANDLED_ERROR_HANDLER` that cannot be imported. Run `manage.py check` in your
-release step if you serve with gunicorn.
+The key and the service factory are enforced by a Django system check, so a deployment
+missing either fails on `manage.py check` and on `runserver` rather than on the first
+request: `vintasend_api.E001` for the key, which is only required when no authenticator is
+set, and `vintasend_api.E002` for the factory. So is a setting naming something that cannot
+be imported or called: `vintasend_api.E003` for `VINTASEND_UNHANDLED_ERROR_HANDLER` and
+`vintasend_api.E004` for `VINTASEND_API_AUTHENTICATOR`. Run `manage.py check` in your release
+step if you serve with gunicorn.
 
 ## Unexpected errors
 
