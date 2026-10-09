@@ -4,6 +4,8 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.core.checks import Error, register
 
+from .hooks import HANDLER_SETTING, configured_handler
+
 
 class DashboardConfig(AppConfig):
     name = "vintasend_api.dashboard"
@@ -49,6 +51,17 @@ def check_api_configuration(app_configs: object, **kwargs: object) -> list[Error
                     "Start from vintasend_config.example.py."
                 ),
                 id="vintasend_api.E002",
+            )
+        )
+
+    try:
+        configured_handler()
+    except (ImportError, TypeError) as error:
+        errors.append(
+            Error(
+                f"{HANDLER_SETTING} cannot be used: {error}",
+                hint="Point it at an importable callable, or leave it empty.",
+                id="vintasend_api.E003",
             )
         )
 

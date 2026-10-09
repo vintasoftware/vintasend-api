@@ -66,15 +66,25 @@ A browsable version of the generated schema is served at `/api/v1/docs`.
 Conventions the dashboard depends on:
 
 - `page` is **1-indexed** on the wire.
-- `hasMore` is `true` when a page comes back full. Backends are not required to produce
-  a total count.
+- `hasMore` is `true` when the next page has at least one row, so a list that exactly
+  fills its last page never offers an empty one. Backends are not required to produce a
+  total count: after a full page, the API reads the one row that would follow it.
 - List rows carry a `kind` field (`user` or `one-off`) so clients can discriminate
   without sniffing for the presence of fields.
 - Timestamps are ISO-8601 UTC strings, `null` when unset — never absent.
 - Every notification payload carries `requestedTemplateVersion` and `usedTemplateVersion`,
   which are `null` for a service whose template renderer has no versions. See
   [Template versions](#template-versions).
-- Errors always use the envelope `{ "error": { "code", "message", "details"? } }`.
+- Errors always use the envelope `{ "error": { "code", "message", "details"? } }`, and
+  every 400 carries `details.issues: [{ path, message }]` — `path` empty for the body as a
+  whole.
+- Request bodies are JSON. A request declaring `application/json` (or any
+  `application/*+json`) must carry a valid JSON object. One declaring no media type, or
+  another one, counts as an omitted body when it is empty and is a 400 otherwise:
+  `curl -d` sends form encoding unless told otherwise, and reading that body as `{}` would
+  resend with a regenerated context instead of the stored one.
+- `FORBIDDEN` (403) is declared on every route, for a host that authenticates callers
+  itself and refuses one it knows. The API key alone never produces it.
 
 ## Template versions
 
@@ -188,6 +198,7 @@ which backend holds the notifications.
 | `VINTASEND_API_KEY` | yes | Shared secret clients must send as a bearer token. |
 | `NOTIFICATION_SERVICE_FACTORY` | yes | Dotted path to the callable building your VintaSend service. |
 | `VINTASEND_BACKEND_IDENTIFIER` | no | Read from a non-primary backend registered in your service. |
+| `VINTASEND_UNHANDLED_ERROR_HANDLER` | no | Dotted path to a callable `(exc, request, request_id)` receiving every unexpected error. See [Unexpected errors](#unexpected-errors). |
 | `VINTASEND_API_CORS_ORIGINS` | no | Comma-separated browser origins allowed to call the API. |
 | `DJANGO_SECRET_KEY` | no | Django requires one; this API signs nothing. |
 | `DJANGO_DEBUG` / `DJANGO_ALLOWED_HOSTS` / `DJANGO_LOG_LEVEL` | no | Standard Django knobs. |
@@ -201,8 +212,27 @@ The `GITHUB_*` variables are only read when `/preview` is called, so the API run
 without them if you do not use template previews.
 
 The first two are enforced by a Django system check, so a deployment missing either
-fails on `manage.py check` and on `runserver` rather than on the first request. Run
-`manage.py check` in your release step if you serve with gunicorn.
+fails on `manage.py check` and on `runserver` rather than on the first request. So is a
+`VINTASEND_UNHANDLED_ERROR_HANDLER` that cannot be imported. Run `manage.py check` in your
+release step if you serve with gunicorn.
+
+## Unexpected errors
+
+An error the API does not map to a contract error answers a generic 500
+`INTERNAL_ERROR` with an `X-Request-Id` header, and is logged as one line: the error's
+class, the request id, the method and the route pattern (`api/v1/notifications/<id>`, not
+the path). Never its message, its traceback, the request body or the notification id: an
+error from the notification store, a provider or a context generator can quote
+notification content, recipients and context values, which in the applications this API
+serves can be health data. Django's own `django.request` record for the 500 is suppressed
+too, since it would repeat the concrete path and attach the request.
+
+The request id is the client's `X-Request-Id` when it matches `[A-Za-z0-9._-]{1,128}`, and
+a fresh UUID otherwise, so a client cannot forge a log line through it.
+
+Set `VINTASEND_UNHANDLED_ERROR_HANDLER` to send errors to a tracker with its own scrubbing
+instead; keeping health data out of it is then your call. It may be `async`. If it raises,
+the redacted line is logged in its place, and what it raised is not.
 
 ## Development
 

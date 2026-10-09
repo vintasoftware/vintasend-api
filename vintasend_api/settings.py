@@ -118,6 +118,10 @@ NOTIFICATION_SERVICE_FACTORY = _env("NOTIFICATION_SERVICE_FACTORY")
 # Read from a non-primary backend registered in that service. Empty means the primary.
 VINTASEND_BACKEND_IDENTIFIER = _env("VINTASEND_BACKEND_IDENTIFIER") or None
 
+# Optional. Dotted path to a callable `(exc, request, request_id) -> None` that receives every
+# unexpected error. Unset, one redacted line is logged. See dashboard/hooks.py.
+VINTASEND_UNHANDLED_ERROR_HANDLER = _env("VINTASEND_UNHANDLED_ERROR_HANDLER")
+
 # --- Template preview (GitHub) -----------------------------------------------------
 # Only read when /preview is called, so the API runs fine without them.
 

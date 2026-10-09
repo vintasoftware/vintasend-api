@@ -36,6 +36,7 @@ NotificationOrderDirection = Literal["asc", "desc"]
 ApiErrorCode = Literal[
     "BAD_REQUEST",
     "UNAUTHORIZED",
+    "FORBIDDEN",
     "NOT_FOUND",
     "CONFLICT",
     "PREVIEW_UNAVAILABLE",
