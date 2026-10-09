@@ -24,6 +24,11 @@ API_VERSION = "v1"
 
 API_BASE_PATH = f"/api/{API_VERSION}"
 
+# The main NinjaAPI's URL namespace. Ninja's default, ``api-<version>``, is shared by every
+# API at 1.0.0 -- the templates management API among them -- so a project mounting both
+# would have colliding names.
+URLS_NAMESPACE = "vintasend_api"
+
 NotificationStatus = Literal["PENDING_SEND", "SENT", "FAILED", "READ", "CANCELLED"]
 
 NotificationType = Literal["EMAIL", "SMS", "PUSH", "IN_APP"]

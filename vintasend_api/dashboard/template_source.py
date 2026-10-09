@@ -13,12 +13,11 @@ from collections import OrderedDict
 from typing import Protocol
 from urllib.parse import quote, urlparse
 
-from django.conf import settings
-
 import requests
 
+from . import conf
+from .conf import DEFAULT_GITHUB_API_BASE_URL
 
-DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com"
 
 _SSH_REPO_PATTERN = re.compile(r"^git@[^:]+:([^/\s]+)/([^/\s]+)$")
 _DIRECT_REPO_PATTERN = re.compile(r"^([^/\s]+)/([^/\s]+)$")
@@ -245,18 +244,20 @@ def create_github_template_client_from_settings() -> GitHubTemplateClient:
     The ``GITHUB_*`` settings are only read here, which is only reached from
     ``/preview``, so an API that does not use template previews runs fine without them.
     """
-    if not settings.GITHUB_REPO:
+    repo = conf.github_repo()
+    api_key = conf.github_api_key()
+    if not repo:
         raise TemplateSourceError("GITHUB_REPO is required (owner/repo).")
-    if not settings.GITHUB_API_KEY:
+    if not api_key:
         raise TemplateSourceError("GITHUB_API_KEY is required for template preview.")
 
     return GitHubTemplateClient(
-        repo=settings.GITHUB_REPO,
-        api_key=settings.GITHUB_API_KEY,
-        api_base_url=settings.GITHUB_API_BASE_URL or DEFAULT_GITHUB_API_BASE_URL,
-        templates_base_path=settings.GITHUB_TEMPLATES_BASE_PATH,
-        cache_max_entries=settings.GITHUB_TEMPLATE_CACHE_MAX_ENTRIES,
-        timeout_seconds=settings.GITHUB_TEMPLATE_TIMEOUT_SECONDS,
+        repo=repo,
+        api_key=api_key,
+        api_base_url=conf.github_api_base_url(),
+        templates_base_path=conf.github_templates_base_path(),
+        cache_max_entries=conf.github_template_cache_max_entries(),
+        timeout_seconds=conf.github_template_timeout_seconds(),
     )
 
 

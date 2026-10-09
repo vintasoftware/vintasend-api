@@ -19,3 +19,6 @@ coverage.xml
 coverage-*.xml
 coverage.json
 htmlcov/
+
+# poetry build output
+dist/

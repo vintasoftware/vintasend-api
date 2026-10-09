@@ -22,8 +22,6 @@ import logging
 import threading
 from typing import Any
 
-from django.conf import settings
-
 from asgiref.sync import async_to_sync
 from vintasend.exceptions import NotificationNotFoundError, NotificationResendError
 from vintasend.services.dataclasses import Notification, OneOffNotification
@@ -37,6 +35,7 @@ from vintasend.services.notification_template_renderers.base_templated_email_ren
     TemplatedEmail,
 )
 
+from . import conf
 from .capabilities import backend_page_number, to_wire_capabilities
 
 
@@ -312,8 +311,8 @@ def get_service_caller() -> ServiceCaller:
         if _cached_caller is not None:
             return _cached_caller
 
-        service = load_notification_service(settings.NOTIFICATION_SERVICE_FACTORY)
-        _cached_caller = ServiceCaller(service, settings.VINTASEND_BACKEND_IDENTIFIER)
+        service = load_notification_service(conf.service_factory())
+        _cached_caller = ServiceCaller(service, conf.backend_identifier())
         return _cached_caller
 
 

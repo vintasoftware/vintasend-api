@@ -16,14 +16,14 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from django.conf import settings
-
 from ..api import api
+from ..contract import API_BASE_PATH
 
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
-OPENAPI_PATH = Path(settings.BASE_DIR) / "openapi.yaml"
+# The repository root. The tests only run from a checkout: the package ships without them.
+OPENAPI_PATH = Path(__file__).resolve().parents[3] / "openapi.yaml"
 
 
 def documented_statuses() -> dict[tuple[str, str], frozenset[str]]:
@@ -65,8 +65,15 @@ def documented_statuses() -> dict[tuple[str, str], frozenset[str]]:
 
 @cache
 def declared_statuses() -> dict[tuple[str, str], frozenset[str]]:
-    """(METHOD, path) -> the status codes the Python routes declare for that operation."""
-    paths: dict[str, dict[str, Any]] = api.get_openapi_schema()["paths"]
+    """(METHOD, path) -> the status codes the Python routes declare for that operation.
+
+    Built against the contract's own prefix rather than wherever the URLconf mounts the API:
+    left to Ninja, the prefix comes from ``reverse()``, so a first call made while a test has
+    the API mounted under a host's prefix would cache that prefix for every test after it.
+    """
+    paths: dict[str, dict[str, Any]] = api.get_openapi_schema(path_prefix=f"{API_BASE_PATH}/")[
+        "paths"
+    ]
     return {
         (method.upper(), path): frozenset(str(code) for code in operation["responses"])
         for path, methods in paths.items()
@@ -83,6 +90,10 @@ def undeclared_status(method: str, route: str, status: int) -> str | None:
     if not 400 <= status < 500:
         return None
     path = "/" + re.sub(r"<(?:\w+:)?(\w+)>", r"{\1}", route)
+    # Under a host's prefix it is the same operation: the contract's paths start at /api/v1.
+    mounted_at = path.find(f"{API_BASE_PATH}/")
+    if mounted_at > 0:
+        path = path[mounted_at:]
     declared = declared_statuses().get((method, path))
     if declared is None or str(status) in declared:
         return None

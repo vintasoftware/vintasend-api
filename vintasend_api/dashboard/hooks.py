@@ -10,6 +10,9 @@ set, or when it raises, ``log_unhandled_error`` writes one redacted line instead
 Unexpected errors are not logged whole by default because an error from a notification
 backend, a provider or a context generator can quote notification content, recipients or
 context values, and the applications this API serves handle health data.
+
+``configured_hook`` resolves this setting and ``VINTASEND_API_AUTHENTICATOR`` too (see
+``auth.py``), so both fail the system checks the same way when they cannot be used.
 """
 
 import inspect
@@ -19,11 +22,12 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import cast
 
-from django.conf import settings
 from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
 from asgiref.sync import async_to_sync
+
+from . import conf
 
 
 logger = logging.getLogger(__name__)
@@ -32,11 +36,28 @@ UnhandledErrorHandler = Callable[[Exception, HttpRequest, str], "None | Awaitabl
 
 REQUEST_ID_HEADER = "X-Request-Id"
 
-HANDLER_SETTING = "VINTASEND_UNHANDLED_ERROR_HANDLER"
+HANDLER_SETTING = conf.UNHANDLED_ERROR_HANDLER
 
 # Only an id that cannot break a log line out of its field is taken from the client. Matched
 # with ``fullmatch``: ``$`` would also accept a trailing newline.
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def configured_hook(setting_name: str) -> Callable[..., object] | None:
+    """The callable a hook setting names, or None when it is unset.
+
+    The setting holds a dotted path or the callable itself.
+
+    raises ImportError: if a dotted path cannot be imported.
+    raises TypeError: if the setting names something that is not callable.
+    """
+    value = conf.hook_setting(setting_name)
+    if not value:
+        return None
+    hook = import_string(value) if isinstance(value, str) else value
+    if not callable(hook):
+        raise TypeError(f"{setting_name} must name a callable, not {type(hook).__name__}.")
+    return cast(Callable[..., object], hook)
 
 
 def configured_handler() -> Callable[..., object] | None:
@@ -45,13 +66,7 @@ def configured_handler() -> Callable[..., object] | None:
     raises ImportError: if a dotted path cannot be imported.
     raises TypeError: if the setting names something that is not callable.
     """
-    value = getattr(settings, HANDLER_SETTING, None)
-    if not value:
-        return None
-    handler = import_string(value) if isinstance(value, str) else value
-    if not callable(handler):
-        raise TypeError(f"{HANDLER_SETTING} must name a callable, not {type(handler).__name__}.")
-    return cast(Callable[..., object], handler)
+    return configured_hook(HANDLER_SETTING)
 
 
 def request_id_for(request: HttpRequest) -> str:
