@@ -54,6 +54,30 @@ def refuse_as_forbidden(request: HttpRequest) -> None:
     raise ApiError("FORBIDDEN", "Not allowed.")
 
 
+def _the_other_packages_error_class() -> type[Exception]:
+    """What the other VintaSend API's ``ApiError`` looks like from here: same name and shape,
+    a different class."""
+
+    class ApiError(Exception):  # noqa: N818 - named after the class it stands in for
+        def __init__(self, code: str, message: str) -> None:
+            super().__init__(message)
+            self.code = code
+            self.message = message
+
+    return ApiError
+
+
+OtherPackagesApiError = _the_other_packages_error_class()
+
+
+def refuse_with_the_other_packages_error(request: HttpRequest) -> None:
+    raise OtherPackagesApiError("FORBIDDEN", "Refused by the other API's authenticator.")
+
+
+def refuse_with_a_code_this_contract_lacks(request: HttpRequest) -> None:
+    raise OtherPackagesApiError("TEAPOT", "Not a code either API answers.")
+
+
 def refuse_as_unauthorized(request: HttpRequest) -> None:
     raise ApiError("UNAUTHORIZED", "Sign in first.")
 
@@ -437,3 +461,35 @@ def test_the_contract_check_holds_under_a_prefix(mounted: Any) -> None:
     route = "notifications-api/api/v1/notifications/<id>/cancel"
     assert undeclared_status("POST", route, 404) is None
     assert undeclared_status("POST", route, 400) is not None
+
+
+# --- one authenticator for both VintaSend APIs ---------------------------------------------
+
+
+def test_a_refusal_raised_as_the_other_packages_api_error_is_recognised(
+    client: Client, settings: Any, install_service: Callable[..., Any]
+) -> None:
+    """One authenticator can serve both apps in one project, so it may raise either package's
+    ``ApiError``. It is recognised by its name and code, as the TypeScript packages do."""
+    install_service()
+    settings.VINTASEND_API_AUTHENTICATOR = f"{__name__}.refuse_with_the_other_packages_error"
+
+    response = client.get(LIST, headers=AUTH_HEADERS)
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": {"code": "FORBIDDEN", "message": "Refused by the other API's authenticator."}
+    }
+
+
+def test_an_api_error_with_a_code_that_is_not_a_refusal_is_unexpected(
+    client: Client, settings: Any, install_service: Callable[..., Any]
+) -> None:
+    """Only a 401 or a 403 is an authenticator's answer; anything else is a failure."""
+    install_service()
+    settings.VINTASEND_API_AUTHENTICATOR = f"{__name__}.refuse_with_a_code_this_contract_lacks"
+    unguarded = Client(raise_request_exception=False)
+
+    response = unguarded.get(LIST, headers=AUTH_HEADERS)
+
+    assert response.status_code == 500

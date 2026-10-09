@@ -41,6 +41,7 @@ __all__ = [
     "ApiError",
     "ApiKeyAuth",
     "Authenticator",
+    "as_refusal",
     "bearer_token",
     "check_api_key",
     "configured_authenticator",
@@ -53,6 +54,27 @@ Authenticator = Callable[[HttpRequest], "None | Awaitable[None]"]
 _BEARER = re.compile(r"Bearer\s+(.+)", re.IGNORECASE)
 
 _KEY_REQUIRED = "A valid API key is required."
+
+
+# What an authenticator answers when it refuses a caller.
+_REFUSALS = ("UNAUTHORIZED", "FORBIDDEN")
+
+
+def as_refusal(error: BaseException) -> ApiError | None:
+    """The refusal an authenticator raised, as this package's ``ApiError``, or None.
+
+    One authenticator can serve both VintaSend APIs mounted in one project, so it may raise
+    the other package's ``ApiError``. That one is recognised by its class name and code, as
+    the TypeScript packages do, rather than by its class, which this package cannot import.
+    Only a 401 or a 403 is an answer an authenticator gives; any other code is a failure.
+    """
+    if isinstance(error, ApiError):
+        return error
+    code = getattr(error, "code", None)
+    if type(error).__name__ != "ApiError" or code not in _REFUSALS:
+        return None
+    message = getattr(error, "message", None)
+    return ApiError(code, message if isinstance(message, str) else str(error))
 
 
 def bearer_token(request_or_header: HttpRequest | str | None) -> str | None:
@@ -116,9 +138,15 @@ class ApiKeyAuth(HttpAuthBase):
         if authenticator is None:
             check_api_key(request)
         else:
-            outcome = authenticator(request)
-            # An unawaited coroutine would let every caller through.
-            if inspect.isawaitable(outcome):
-                async_to_sync(_awaited)(outcome)
+            try:
+                outcome = authenticator(request)
+                # An unawaited coroutine would let every caller through.
+                if inspect.isawaitable(outcome):
+                    async_to_sync(_awaited)(outcome)
+            except Exception as error:
+                refusal = as_refusal(error)
+                if refusal is None or refusal is error:
+                    raise
+                raise refusal from error
         # Ninja treats a falsy answer as "not authenticated", so success is spelled out.
         return True

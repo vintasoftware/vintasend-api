@@ -240,9 +240,12 @@ Give the setting as a dotted path. Assigning the function itself also works, but
 it into `settings.py` imports django-ninja while the settings are still being defined, and
 django-ninja reads its own `NINJA_*` settings at import: any defined further down are missed.
 
-Raise this package's `ApiError`, which `vintasend_api.dashboard.auth` re-exports. The app
-recognises its own error class only: another package's, including
-`vintasend-templates-management-api`'s, is answered as a 500.
+Raise `ApiError`, which `vintasend_api.dashboard.auth` re-exports. The setting has the same
+name and shape in `vintasend-templates-management-api`, so a project mounting both can point
+them at one function, and that function may raise either package's `ApiError`: a refusal is
+recognised by its class name and its code, as the TypeScript packages do, not by its class.
+Only `UNAUTHORIZED` and `FORBIDDEN` count as a refusal; an `ApiError` with any other code, like
+any other exception, is an unexpected error and answers 500.
 
 `check_api_key(request)` in the same module is the shared-key check the app runs when no
 authenticator is set, for an authenticator that still accepts the key, such as from a
