@@ -1,6 +1,6 @@
 [project]
 name = "vintasend-api"
-version = "3.4.0"
+version = "3.5.0"
 description = "REST API that exposes a VintaSend notification service over HTTP for the VintaSend dashboard UI"
 authors = [{ name = "Vinta Software", email = "contact@vinta.com.br" }]
 license = "MIT"
@@ -59,7 +59,7 @@ exclude = ["vintasend_api/**/tests", "vintasend_api/**/tests/**"]
 include = [{ path = "openapi.yaml", format = "sdist" }]
 
 [tool.poetry.dependencies]
-vintasend = "3.4.0"
+vintasend = "3.5.0"
 django = ">=4.2,<6.0"
 django-ninja = "^1.4.3"
 requests = "^2.34.2"
