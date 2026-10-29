@@ -45,8 +45,8 @@ jobs:
         run: pipx install poetry
       - name: Install dependencies
         run: poetry install
+      # tox.ini sets the placeholder settings the bundled project needs, and the
+      # [gh] section runs only the envs mapped to this job's interpreter -- one per
+      # Django release that supports it.
       - name: Run tests
-        run: poetry run pytest
-        env:
-          VINTASEND_API_KEY: ci
-          NOTIFICATION_SERVICE_FACTORY: ci.factory
+        run: poetry run tox

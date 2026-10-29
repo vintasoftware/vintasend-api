@@ -32,7 +32,7 @@ from . import conf
 
 logger = logging.getLogger(__name__)
 
-UnhandledErrorHandler = Callable[[Exception, HttpRequest, str], "None | Awaitable[None]"]
+UnhandledErrorHandler = Callable[[Exception, HttpRequest, str], "Awaitable[None] | None"]
 
 REQUEST_ID_HEADER = "X-Request-Id"
 
