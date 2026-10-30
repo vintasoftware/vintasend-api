@@ -47,7 +47,7 @@ __all__ = [
     "configured_authenticator",
 ]
 
-Authenticator = Callable[[HttpRequest], "None | Awaitable[None]"]
+Authenticator = Callable[[HttpRequest], "Awaitable[None] | None"]
 
 # The scheme is matched in any case, as RFC 9110 has it. `\s+` rather than one space, and the
 # token stripped, so the answer is the same as the TypeScript twin's `bearerToken`.
