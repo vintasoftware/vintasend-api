@@ -17,12 +17,14 @@ Two things this module absorbs so the routes stay simple:
 2. **One-off listing has no library method.** See :meth:`ServiceCaller.get_one_off_notifications`.
 """
 
+import datetime
 import inspect
 import logging
 import threading
 from typing import Any
 
 from asgiref.sync import async_to_sync
+from vintasend.constants import UNSET, UnsetType
 from vintasend.exceptions import NotificationNotFoundError, NotificationResendError
 from vintasend.services.dataclasses import Notification, OneOffNotification
 from vintasend.services.helpers import _import_class
@@ -278,6 +280,32 @@ class ServiceCaller:
 
     def cancel_notification(self, notification_id: str) -> None:
         _resolve(self.service.cancel_notification(notification_id))
+
+    def requeue_notification(
+        self,
+        notification_id: str,
+        send_after: datetime.datetime | UnsetType | None = UNSET,
+    ) -> AnyNotification:
+        """Requeue a failed or cancelled notification on the primary backend.
+
+        ``send_after`` is passed only when the caller gave one, ``None`` included: left out,
+        the notification keeps its own. The service's ``NotificationActionError`` refusals
+        propagate, and the route maps them onto 404 and 409.
+        """
+        if send_after is UNSET:
+            return _resolve(self.service.requeue_notification(notification_id))
+        return _resolve(self.service.requeue_notification(notification_id, send_after=send_after))
+
+    def repin_notification(
+        self, notification_id: str, template_version: int | None = None
+    ) -> AnyNotification:
+        """Pin a notification to a template version, by default the current one.
+
+        The service's ``NotificationActionError`` refusals propagate, as for requeue.
+        """
+        return _resolve(
+            self.service.repin_notification(notification_id, template_version=template_version)
+        )
 
     # --- rendering -----------------------------------------------------------------
 

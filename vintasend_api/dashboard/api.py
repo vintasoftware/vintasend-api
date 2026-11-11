@@ -11,6 +11,9 @@ from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from ninja import NinjaAPI, Query, Status
 from ninja.errors import AuthenticationError, HttpError, ValidationError
 
+from vintasend.constants import UNSET
+from vintasend.exceptions import NotificationActionError
+
 from .auth import ApiKeyAuth
 from .bodies import JsonBodyParser, refuse_an_empty_json_body
 from .contract import (
@@ -30,7 +33,7 @@ from .errors import STATUS_BY_CODE, ApiError, invalid_request, issue
 from .filters import build_backend_filter, build_order_by
 from .hooks import REQUEST_ID_HEADER, report_unhandled_error, request_id_for
 from .preview import build_notification_preview
-from .query import NotificationListQuery, PaginationQuery, ResendBody
+from .query import NotificationListQuery, PaginationQuery, RepinBody, RequeueBody, ResendBody
 from .serialize import (
     AnyNotification,
     ListNotificationOut,
@@ -72,6 +75,16 @@ CANCEL_ERRORS: dict[int, Any] = {
     **LOOKUP_ERRORS,
     409: ApiErrorResponse,
 }
+# Requeue and repin: an invalid body, an unknown notification, and a refusal by the service.
+NOTIFICATION_ACTION_ERRORS: dict[int, Any] = {
+    400: ApiErrorResponse,
+    **LOOKUP_ERRORS,
+    409: ApiErrorResponse,
+}
+# Both bodies are optional. An omitted one has no fields set, which is what tells "keep the
+# schedule" and "pin the current version" apart from a value the caller sent.
+DEFAULT_REQUEUE_BODY = RequeueBody()
+DEFAULT_REPIN_BODY = RepinBody()
 
 api = NinjaAPI(
     title="VintaSend Dashboard API",
@@ -222,6 +235,20 @@ def _paginate(
     return {"data": data, "page": page, "pageSize": page_size, "hasMore": has_more}
 
 
+def _run_notification_action(action: Callable[[], AnyNotification]) -> AnyNotification:
+    """Run a requeue or repin, answering the service's refusals with the contract's 404 and 409.
+
+    The service's message names the notification by its ID and nothing else, so it is passed
+    on as it is. Any other failure is left to the generic 500.
+    """
+    try:
+        return action()
+    except NotificationActionError as error:
+        if error.reason == "NOT_FOUND":
+            raise ApiError.not_found(error.message) from error
+        raise ApiError.conflict(error.message) from error
+
+
 def _find_notification(service: ServiceCaller, notification_id: str) -> AnyNotification:
     notification = service.get_notification(notification_id)
     if notification is None:
@@ -370,6 +397,45 @@ def cancel_notification(request: HttpRequest, id: str) -> dict[str, Any]:  # noq
     service.cancel_notification(id)
 
     return {"data": CancelledNotificationOut(id=id, status="CANCELLED")}
+
+
+@api.post(
+    "/notifications/{id}/requeue",
+    response={200: DataResponse[NotificationOut], **NOTIFICATION_ACTION_ERRORS},
+    tags=["notifications"],
+)
+def requeue_notification(
+    request: HttpRequest,
+    id: str,  # noqa: A002
+    payload: RequeueBody = DEFAULT_REQUEUE_BODY,
+) -> dict[str, Any]:
+    refuse_an_empty_json_body(request)
+    service = get_service_caller()
+    send_after = payload.sendAfter if "sendAfter" in payload.model_fields_set else UNSET
+
+    requeued = _run_notification_action(lambda: service.requeue_notification(id, send_after))
+
+    return {"data": serialize_notification(requeued)}
+
+
+@api.post(
+    "/notifications/{id}/repin",
+    response={200: DataResponse[NotificationOut], **NOTIFICATION_ACTION_ERRORS},
+    tags=["notifications"],
+)
+def repin_notification(
+    request: HttpRequest,
+    id: str,  # noqa: A002
+    payload: RepinBody = DEFAULT_REPIN_BODY,
+) -> dict[str, Any]:
+    refuse_an_empty_json_body(request)
+    service = get_service_caller()
+
+    repinned = _run_notification_action(
+        lambda: service.repin_notification(id, payload.templateVersion)
+    )
+
+    return {"data": serialize_notification(repinned)}
 
 
 # --- health --------------------------------------------------------------------------
