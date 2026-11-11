@@ -61,7 +61,7 @@ exclude = ["vintasend_api/**/tests", "vintasend_api/**/tests/**"]
 include = [{ path = "openapi.yaml", format = "sdist" }]
 
 [tool.poetry.dependencies]
-vintasend = "3.6.0"
+vintasend = "3.7.0"
 django = ">=4.2,<6.2"
 django-ninja = "^1.4.3"
 requests = "^2.34.2"
