@@ -1176,3 +1176,80 @@ def test_an_asyncio_service_is_served_the_same(post: Callable[..., Any], tmp_pat
     assert listed["id"] == str(created.id)
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "PENDING_SEND"
+
+
+# --- a replica configured as the API's backend -----------------------------------------------
+
+
+class _ReplayingReplica(FakeFileBackend):
+    """A replica written before 3.8.0's token replication: it neither applies snapshots nor
+    takes the primary's token on the writes it replays, so it holds tokens of its own."""
+
+    apply_replication_snapshot_if_newer = (
+        BaseNotificationBackend.apply_replication_snapshot_if_newer
+    )
+
+    def get_action_capabilities(self) -> dict[str, bool]:
+        return {
+            **super().get_action_capabilities(),
+            "writes.notificationVersion": False,
+        }
+
+
+def _replicated_service(
+    tmp_path: Path, replica: FakeFileBackend
+) -> tuple[NotificationService, FakeFileBackend]:
+    """A service whose primary replicates inline to ``replica``, and the API reading the replica
+    (the service names it ``backend-1``)."""
+    primary = FakeFileBackend(database_file_name=str(tmp_path / "primary.json"))
+    service: NotificationService = NotificationService(
+        notification_adapters=[], notification_backend=primary, additional_backends=[replica]
+    )
+    assert service._get_backend("backend-1") is replica
+    set_service_caller(ServiceCaller(service, "backend-1"))
+    return service, primary
+
+
+def _tokens(backend: FakeFileBackend) -> dict[str, str]:
+    return {str(v.id): v.version for v in backend.filter_notification_versions({}, 1, 1000)}
+
+
+def test_a_version_listed_from_a_replica_moves_the_notification_on_the_primary(
+    post: Callable[..., Any], tmp_path: Path
+) -> None:
+    replica = FakeFileBackend(database_file_name=str(tmp_path / "replica.json"))
+    service, primary = _replicated_service(tmp_path, replica)
+    cancelled = _create(service)
+    service.cancel_notification(cancelled.id)
+    assert _tokens(replica) == _tokens(primary)
+
+    [listed] = post(VERSIONS, {"filter": {"status": "CANCELLED"}}).json()["data"]
+    response = post(
+        f"/api/v1/notifications/{cancelled.id}/requeue",
+        {"expectedVersion": listed["version"], "templateVersion": 4, "send": False},
+    )
+
+    assert response.status_code == 200
+    assert primary.get_notification(cancelled.id).status == NotificationStatus.PENDING_SEND.value
+    # The replica took the primary's new token with the requeue, so the next listing from it
+    # hands out a version the primary accepts.
+    assert _tokens(replica) == _tokens(primary)
+    assert _tokens(replica)[str(cancelled.id)] != listed["version"]
+
+
+def test_a_replica_with_tokens_of_its_own_cannot_list_versions(
+    get: Callable[..., Any], post: Callable[..., Any], tmp_path: Path
+) -> None:
+    replica = _ReplayingReplica(database_file_name=str(tmp_path / "replica.json"))
+    _replicated_service(tmp_path, replica)
+
+    capabilities = get(CAPABILITIES).json()["data"]
+    response = post(VERSIONS)
+
+    # Moves run on the primary, which supports them; versions would come from the replica,
+    # whose tokens the primary would always refuse.
+    assert capabilities["requeue.expectedVersion"] is True
+    assert capabilities["repin.expectedVersion"] is True
+    assert capabilities["versions.filter"] is False
+    assert response.status_code == 409
+    assert response.json()["error"]["details"] == {"reason": "UNSUPPORTED"}

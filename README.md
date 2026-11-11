@@ -152,6 +152,16 @@ the option: `repin.expectedVersion`, `requeue.expectedVersion`, `requeue.templat
 `fields.hasRequestedTemplateVersion` and their `negation.*` keys, which default to `false` in
 the library, so a backend that predates them never claims them.
 
+When `VINTASEND_BACKEND_IDENTIFIER` names a replica, the versions search reads the replica and
+requeue and repin still run on the primary. That works because, since `vintasend` 3.8.0, a
+replica that applies replication snapshots, or takes the primary's token on its writes, holds the
+primary's version token once its copy of a notification matches the primary's. A version listed
+from it is therefore one the primary accepts, and a replica that has not caught up hands out a
+version the primary refuses (usually with `CHANGED`); list again. `/capabilities` follows where
+each action runs: the `requeue.*` and `repin.*` keys are the primary's, and `versions.filter` is
+`true` only for a replica that carries the primary's tokens. A replica that keeps tokens of its
+own reports `false`, and the versions search is a 409 `UNSUPPORTED` there.
+
 A browsable version of the generated schema is served at `/api/v1/docs`.
 
 Conventions the dashboard depends on:
