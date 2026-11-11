@@ -387,6 +387,115 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/v1/notifications/{id}/requeue:
+    post:
+      tags: [notifications]
+      summary: Requeue a failed or cancelled notification
+      description: |
+        Puts a `FAILED` or `CANCELLED` notification back into `PENDING_SEND`.
+        The notification keeps its ID, content and template pin, so this
+        retries the same notification, where `resend` creates a new one. When
+        it is due (`sendAfter` is `null` or in the past) it is sent right away,
+        so the returned notification may already be stale. Backends that
+        delete cancelled notifications only requeue failed ones.
+      parameters:
+        - $ref: '#/components/parameters/notificationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sendAfter:
+                  type: [string, 'null']
+                  format: date-time
+                  description: |
+                    When to send it. Omitted, the notification keeps its own
+                    `sendAfter`; `null` sends it as soon as it is requeued.
+      responses:
+        '200':
+          description: The notification as it stands after being requeued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The notification is not in `FAILED` or `CANCELLED` status
+            (`CONFLICT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/notifications/{id}/repin:
+    post:
+      tags: [notifications]
+      summary: Pin a notification to a template version
+      description: |
+        Sets `requestedTemplateVersion`, by default to the version the
+        template renderer reports as current. Use it after publishing a fixed
+        template to move notifications that have not been delivered onto it.
+        Allowed in `PENDING_SEND`, `FAILED` and `CANCELLED`. It neither sends
+        nor changes the status; requeue a failed notification afterwards.
+        Repinning to the version already pinned changes nothing.
+      parameters:
+        - $ref: '#/components/parameters/notificationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templateVersion:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    Pin this version instead of the current one. It is not
+                    checked against the template source.
+      responses:
+        '200':
+          description: The notification with its new pin.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The notification was already delivered (`SENT` or `READ`), or no
+            version was given and the template renderer reports none
+            (`CONFLICT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   securitySchemes:
     apiKey:

@@ -60,6 +60,29 @@ rendering, GitHub template lookups. The UI owns presentation and user authentica
 | GET | `/api/v1/notifications/{id}/preview` | Templates rendered at the notification's commit |
 | POST | `/api/v1/notifications/{id}/resend` | Resend a notification |
 | POST | `/api/v1/notifications/{id}/cancel` | Cancel a pending notification |
+| POST | `/api/v1/notifications/{id}/requeue` | Put a failed or cancelled notification back into `PENDING_SEND` |
+| POST | `/api/v1/notifications/{id}/repin` | Pin a notification that was not delivered to a template version |
+
+### Requeue and repin
+
+Both answer `{ "data": Notification }`, serialized like a list row (`kind`, ISO-8601 UTC
+timestamps, `null` for unset values). Both bodies are optional, and wire names stay
+camelCase.
+
+- **`requeue`** takes `{ "sendAfter"?: string | null }`. Left out, the notification keeps
+  its own `sendAfter`; `null` sends it as soon as it is requeued. A date without a time zone
+  is read as UTC. The notification keeps its ID, content and template pin, and is sent right
+  away when it is due, so the returned row may already be stale. 409 when it is not `FAILED`
+  or `CANCELLED`.
+- **`repin`** takes `{ "templateVersion"?: integer }`, which must be a JSON integer `>= 0`
+  (`0` is valid). `-1`, `1.5`, `"3"`, `true` and `null` are 400s. Left out, the version the
+  template renderer reports as current is pinned. It neither sends nor changes the status.
+  409 when the notification was already delivered, or when no version was given and the
+  renderer reports none.
+
+Both answer 404 for an unknown ID. The 404 and 409 messages are the core library's, which
+name the notification by ID only. Any other failure is the generic 500 `INTERNAL_ERROR`,
+which never includes the underlying error's message.
 
 A browsable version of the generated schema is served at `/api/v1/docs`.
 

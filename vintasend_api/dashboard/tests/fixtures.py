@@ -119,6 +119,14 @@ class FakeService:
         self.notification_error: Exception | None = None
         self.resend_result: Notification | None = None
         self.resend_error: Exception | None = None
+        self.requeue_result: Notification | OneOffNotification = make_user_notification(
+            status="PENDING_SEND", sent_at=None
+        )
+        self.requeue_error: Exception | None = None
+        self.repin_result: Notification | OneOffNotification = make_user_notification(
+            status="FAILED"
+        )
+        self.repin_error: Exception | None = None
         self.rendered = TemplatedEmail(subject="<h1>Subject</h1>", body="<p>Body</p>")
         self.generated_context: dict[str, Any] = {"generated": True}
         for key, value in overrides.items():
@@ -193,6 +201,19 @@ class FakeService:
 
     def cancel_notification(self, notification_id: Any) -> None:
         self._record("cancel_notification", notification_id)
+
+    def requeue_notification(self, notification_id: Any, **kwargs: Any) -> Any:
+        """Records keyword arguments as passed, so a test can tell "left out" from ``None``."""
+        self._record("requeue_notification", notification_id, kwargs)
+        if self.requeue_error is not None:
+            raise self.requeue_error
+        return self.requeue_result
+
+    def repin_notification(self, notification_id: Any, template_version: Any = None) -> Any:
+        self._record("repin_notification", notification_id, template_version)
+        if self.repin_error is not None:
+            raise self.repin_error
+        return self.repin_result
 
     def render_email_template_from_content(
         self, notification: Any, template_content: Any, context: Any
