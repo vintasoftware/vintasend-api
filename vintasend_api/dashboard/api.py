@@ -12,7 +12,7 @@ from ninja import NinjaAPI, Query, Status
 from ninja.errors import AuthenticationError, HttpError, ValidationError
 
 from vintasend.constants import UNSET
-from vintasend.exceptions import NotificationActionError
+from vintasend.exceptions import NotificationActionError, UnsupportedNotificationActionError
 
 from .auth import ApiKeyAuth
 from .bodies import JsonBodyParser, refuse_an_empty_json_body
@@ -26,14 +26,33 @@ from .contract import (
     NotificationDetailOut,
     NotificationOut,
     NotificationPreviewOut,
+    NotificationVersionOut,
     PaginatedResponse,
     UserNotificationOut,
 )
-from .errors import STATUS_BY_CODE, ApiError, invalid_request, issue
-from .filters import build_backend_filter, build_order_by
+from .errors import (
+    STATUS_BY_CODE,
+    ApiError,
+    from_notification_action_error,
+    invalid_request,
+    issue,
+)
+from .filters import (
+    build_backend_filter,
+    build_order_by,
+    to_backend_filter,
+    unsupported_filter_features,
+)
 from .hooks import REQUEST_ID_HEADER, report_unhandled_error, request_id_for
 from .preview import build_notification_preview
-from .query import NotificationListQuery, PaginationQuery, RepinBody, RequeueBody, ResendBody
+from .query import (
+    NotificationListQuery,
+    NotificationVersionsSearchBody,
+    PaginationQuery,
+    RepinBody,
+    RequeueBody,
+    ResendBody,
+)
 from .serialize import (
     AnyNotification,
     ListNotificationOut,
@@ -85,6 +104,16 @@ NOTIFICATION_ACTION_ERRORS: dict[int, Any] = {
 # schedule" and "pin the current version" apart from a value the caller sent.
 DEFAULT_REQUEUE_BODY = RequeueBody()
 DEFAULT_REPIN_BODY = RepinBody()
+
+# The versions search: an invalid body or a filter the backend cannot run, and a backend that
+# cannot list versions at all.
+VERSIONS_SEARCH_ERRORS: dict[int, Any] = {
+    400: ApiErrorResponse,
+    **AUTH_ERRORS,
+    409: ApiErrorResponse,
+}
+# Optional too: an omitted body matches every notification, a page of 100.
+DEFAULT_VERSIONS_SEARCH_BODY = NotificationVersionsSearchBody()
 
 api = NinjaAPI(
     title="VintaSend Dashboard API",
@@ -238,15 +267,34 @@ def _paginate(
 def _run_notification_action(action: Callable[[], AnyNotification]) -> AnyNotification:
     """Run a requeue or repin, answering the service's refusals with the contract's 404 and 409.
 
-    The service's message names the notification by its ID and nothing else, so it is passed
-    on as it is. Any other failure is left to the generic 500.
+    Both carry the service's reason as ``details.reason``; see
+    ``errors.from_notification_action_error``. Any other failure is left to the generic 500.
     """
     try:
         return action()
     except NotificationActionError as error:
-        if error.reason == "NOT_FOUND":
-            raise ApiError.not_found(error.message) from error
-        raise ApiError.conflict(error.message) from error
+        raise from_notification_action_error(error) from error
+
+
+def _refuse_options_the_service_cannot_take(
+    service: ServiceCaller, method_name: str, options: dict[str, Any]
+) -> None:
+    """Refuse the newer action options for a service that would not take them.
+
+    A ``vintasend`` that reports action capabilities refuses an option its backend cannot
+    honour itself, with ``UNSUPPORTED``. One that predates them would drop ``templateVersion``
+    and ``expectedVersion`` silently and send despite ``send: false``, or fail on the unknown
+    keyword, so this API refuses them up front instead, before the service is called.
+
+    raises ApiError: 409 ``UNSUPPORTED`` naming the options, when there are any.
+    """
+    given = [name for name, value in options.items() if value is not None]
+    refused = service.options_it_cannot_take(method_name, given)
+    if refused:
+        raise ApiError.unsupported(
+            f"The configured service does not support {', '.join(refused)}; "
+            "it predates these options."
+        )
 
 
 def _find_notification(service: ServiceCaller, notification_id: str) -> AnyNotification:
@@ -265,7 +313,9 @@ def _find_notification(service: ServiceCaller, notification_id: str) -> AnyNotif
     tags=["system"],
 )
 def get_capabilities(request: HttpRequest) -> dict[str, Any]:
-    return {"data": get_service_caller().get_capabilities()}
+    """The filter capabilities, plus the four action capabilities, always explicit."""
+    service = get_service_caller()
+    return {"data": {**service.get_capabilities(), **service.action_capabilities()}}
 
 
 # --- notifications -------------------------------------------------------------------
@@ -333,6 +383,50 @@ def list_one_off_notifications(
 ) -> dict[str, Any]:
     service = get_service_caller()
     return _paginate(service.get_one_off_notifications, query.page, query.pageSize)
+
+
+@api.post(
+    "/notifications/versions",
+    response={200: PaginatedResponse[NotificationVersionOut], **VERSIONS_SEARCH_ERRORS},
+    tags=["notifications"],
+)
+def search_notification_versions(
+    request: HttpRequest,
+    payload: NotificationVersionsSearchBody = DEFAULT_VERSIONS_SEARCH_BODY,
+) -> dict[str, Any]:
+    """IDs and version tokens of the notifications matching a composable filter.
+
+    Refused with 409 ``UNSUPPORTED`` when the backend cannot list versions, and with a 400
+    naming every part of the filter the backend reports it cannot run -- both before the
+    backend is asked anything -- and with 409 ``UNSUPPORTED`` too when the backend raises
+    ``UnsupportedNotificationActionError`` anyway. ``hasMore`` is worked out the way the
+    listings do it.
+    """
+    refuse_an_empty_json_body(request)
+    service = get_service_caller()
+    if not service.action_capabilities()["versions.filter"]:
+        raise ApiError.unsupported(
+            "The configured backend cannot list notification versions (versions.filter)."
+        )
+
+    issues = unsupported_filter_features(payload.filter, service.backend_capabilities())
+    if issues:
+        raise ApiError.bad_request("The backend cannot run this filter.", issues)
+
+    backend_filter = to_backend_filter(payload.filter)
+    page, page_size = payload.page, payload.pageSize
+    try:
+        versions = service.filter_notification_versions(backend_filter, page, page_size)
+        has_more = len(versions) == page_size and bool(
+            service.filter_notification_versions(backend_filter, page * page_size + 1, 1)
+        )
+    except UnsupportedNotificationActionError as error:
+        # The backend's own message may quote the filter, so it is not passed on.
+        raise ApiError.unsupported(
+            "The configured backend refused to list notification versions for this filter."
+        ) from error
+    data = [NotificationVersionOut(id=str(entry.id), version=entry.version) for entry in versions]
+    return {"data": data, "page": page, "pageSize": page_size, "hasMore": has_more}
 
 
 @api.get(
@@ -411,9 +505,26 @@ def requeue_notification(
 ) -> dict[str, Any]:
     refuse_an_empty_json_body(request)
     service = get_service_caller()
+    _refuse_options_the_service_cannot_take(
+        service,
+        "requeue_notification",
+        {
+            "templateVersion": payload.templateVersion,
+            "expectedVersion": payload.expectedVersion,
+            "send": payload.send,
+        },
+    )
     send_after = payload.sendAfter if "sendAfter" in payload.model_fields_set else UNSET
 
-    requeued = _run_notification_action(lambda: service.requeue_notification(id, send_after))
+    requeued = _run_notification_action(
+        lambda: service.requeue_notification(
+            id,
+            send_after,
+            template_version=payload.templateVersion,
+            expected_version=payload.expectedVersion,
+            send=payload.send,
+        )
+    )
 
     return {"data": serialize_notification(requeued)}
 
@@ -430,9 +541,14 @@ def repin_notification(
 ) -> dict[str, Any]:
     refuse_an_empty_json_body(request)
     service = get_service_caller()
+    _refuse_options_the_service_cannot_take(
+        service, "repin_notification", {"expectedVersion": payload.expectedVersion}
+    )
 
     repinned = _run_notification_action(
-        lambda: service.repin_notification(id, payload.templateVersion)
+        lambda: service.repin_notification(
+            id, payload.templateVersion, expected_version=payload.expectedVersion
+        )
     )
 
     return {"data": serialize_notification(repinned)}

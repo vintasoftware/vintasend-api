@@ -8,7 +8,7 @@ import datetime
 from typing import Any
 
 from vintasend.exceptions import NotificationNotFoundError
-from vintasend.services.dataclasses import Notification, OneOffNotification
+from vintasend.services.dataclasses import Notification, NotificationVersion, OneOffNotification
 from vintasend.services.notification_template_renderers.base_templated_email_renderer import (
     TemplatedEmail,
 )
@@ -29,6 +29,15 @@ DEFAULT_CAPABILITIES = {
     "orderBy.readAt": True,
     "orderBy.updatedAt": True,
 }
+
+# What `/capabilities` reports for the optional notification actions: always all four.
+ALL_ACTION_CAPABILITIES = {
+    "repin.expectedVersion": True,
+    "requeue.expectedVersion": True,
+    "requeue.templateVersion": True,
+    "versions.filter": True,
+}
+NO_ACTION_CAPABILITIES = dict.fromkeys(ALL_ACTION_CAPABILITIES, False)
 
 
 def make_user_notification(**overrides: Any) -> Notification:
@@ -220,6 +229,50 @@ class FakeService:
     ) -> TemplatedEmail:
         self._record("render_email_template_from_content", notification, template_content, context)
         return self.rendered
+
+
+class CapableFakeService(FakeService):
+    """A service on a ``vintasend`` that knows the optional notification actions.
+
+    ``FakeService`` stands for one that predates them: it has no
+    ``get_backend_supported_action_capabilities`` and no ``filter_notification_versions``.
+    This one has both, and a ``repin_notification`` that takes ``expected_version``. Its
+    ``requeue_notification`` is inherited, and already takes any keyword.
+    """
+
+    def __init__(self, **overrides: Any) -> None:
+        self.action_capabilities: dict[str, bool] = dict(ALL_ACTION_CAPABILITIES)
+        # Each call to `filter_notification_versions` answers with the next page here; once
+        # they run out, with an empty one.
+        self.version_pages: list[list[NotificationVersion]] = []
+        super().__init__(**overrides)
+
+    def get_backend_supported_action_capabilities(
+        self, backend_identifier: str | None = None
+    ) -> dict[str, bool]:
+        self._record("get_backend_supported_action_capabilities", backend_identifier)
+        return self.action_capabilities
+
+    def filter_notification_versions(
+        self,
+        backend_filter: Any,
+        page: int,
+        page_size: int,
+        backend_identifier: str | None = None,
+    ) -> list[NotificationVersion]:
+        self._record(
+            "filter_notification_versions", backend_filter, page, page_size, backend_identifier
+        )
+        return self.version_pages.pop(0) if self.version_pages else []
+
+    def repin_notification(  # type: ignore[override]
+        self, notification_id: Any, template_version: Any = None, **kwargs: Any
+    ) -> Any:
+        """Records keyword arguments other than the version as passed, like requeue."""
+        self._record("repin_notification", notification_id, template_version, kwargs)
+        if self.repin_error is not None:
+            raise self.repin_error
+        return self.repin_result
 
 
 class FakeTemplateClient:
