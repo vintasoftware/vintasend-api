@@ -76,6 +76,11 @@ paths:
         namespace, which reports how the backend numbers its pages — are filtered
         out, because the API's own `page` parameter is 1-indexed either way and a
         client that saw them might convert a second time.
+
+        The map also carries the backend's optional notification actions, always
+        all four and always explicit, because for these a missing key would mean
+        "unsupported": `repin.expectedVersion`, `requeue.expectedVersion`,
+        `requeue.templateVersion` and `versions.filter`.
       responses:
         '200':
           description: Capability map.
@@ -396,8 +401,8 @@ paths:
         The notification keeps its ID, content and template pin, so this
         retries the same notification, where `resend` creates a new one. When
         it is due (`sendAfter` is `null` or in the past) it is sent right away,
-        so the returned notification may already be stale. Backends that
-        delete cancelled notifications only requeue failed ones.
+        unless `send` is `false`. Backends that delete cancelled notifications
+        only requeue failed ones.
       parameters:
         - $ref: '#/components/parameters/notificationId'
       requestBody:
@@ -413,9 +418,32 @@ paths:
                   description: |
                     When to send it. Omitted, the notification keeps its own
                     `sendAfter`; `null` sends it as soon as it is requeued.
+                templateVersion:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    Pin this template version in the same write that requeues
+                    it. Needs `requeue.templateVersion` in `/capabilities`.
+                expectedVersion:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+                  description: |
+                    Requeue only if the notification is still at this version,
+                    the token `POST /api/v1/notifications/versions` returned for
+                    it. Needs `requeue.expectedVersion`.
+                send:
+                  type: boolean
+                  description: |
+                    `false` leaves the notification pending for whatever sends
+                    pending notifications, even when it is due. Defaults to
+                    `true`.
       responses:
         '200':
-          description: The notification as it stands after being requeued.
+          description: |
+            The notification as it stands after any send the request started:
+            `SENT` when it went out, `FAILED` when the adapter failed,
+            `PENDING_SEND` when it is waiting.
           content:
             application/json:
               schema:
@@ -434,8 +462,11 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: |
-            The notification is not in `FAILED` or `CANCELLED` status
-            (`CONFLICT`).
+            Refused (`CONFLICT`), with `details.reason`: `INVALID_STATUS` when
+            the notification is not `FAILED` or `CANCELLED`, `CHANGED` when it
+            is no longer at `expectedVersion`, `UNSUPPORTED` when the backend
+            cannot honour `templateVersion`, `expectedVersion` or `send`.
+            Nothing is written.
           content:
             application/json:
               schema:
@@ -450,8 +481,9 @@ paths:
         template renderer reports as current. Use it after publishing a fixed
         template to move notifications that have not been delivered onto it.
         Allowed in `PENDING_SEND`, `FAILED` and `CANCELLED`. It neither sends
-        nor changes the status; requeue a failed notification afterwards.
-        Repinning to the version already pinned changes nothing.
+        nor changes the status; to pin and requeue a failed notification in
+        one write, pass `templateVersion` to requeue instead. Repinning to the
+        version already pinned changes nothing.
       parameters:
         - $ref: '#/components/parameters/notificationId'
       requestBody:
@@ -467,6 +499,13 @@ paths:
                   description: |
                     Pin this version instead of the current one. It is not
                     checked against the template source.
+                expectedVersion:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+                  description: |
+                    Repin only if the notification is still at this version.
+                    Needs `repin.expectedVersion` in `/capabilities`.
       responses:
         '200':
           description: The notification with its new pin.
@@ -488,9 +527,97 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: |
-            The notification was already delivered (`SENT` or `READ`), or no
-            version was given and the template renderer reports none
-            (`CONFLICT`).
+            Refused (`CONFLICT`), with `details.reason`: `INVALID_STATUS` when
+            the notification was already delivered, `NO_TEMPLATE_VERSION` when
+            no version was given and the renderer reports none, `CHANGED` when
+            it is no longer at `expectedVersion`, `UNSUPPORTED` when the
+            backend cannot check `expectedVersion`. Nothing is written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/notifications/versions:
+    post:
+      tags: [notifications]
+      summary: Find notifications by ID and version, without their content
+      description: |
+        Returns `{ id, version }` for every notification matching `filter`,
+        ordered by ID, and nothing else: the backend reads no recipient,
+        context or rendered content to answer. Use it to count or select
+        notifications, then pass `version` as `expectedVersion` to requeue or
+        repin each one only if it has not changed since.
+
+        `filter` is VintaSend's composable filter: a set of fields (ANDed), or
+        `{ and: [...] }`, `{ or: [...] }`, `{ not: ... }`, nesting at most six
+        levels. Strings match exactly and dates are ISO-8601. A filter the
+        backend reports it cannot run (see `/capabilities`) is a 400 naming
+        what it cannot do.
+
+        Requeuing or repinning what this returns changes what matches, so list
+        again from page 1 rather than moving on to the next page.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filter:
+                  $ref: '#/components/schemas/NotificationSearchFilter'
+                page:
+                  type: integer
+                  minimum: 1
+                  default: 1
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 1000
+                  default: 100
+            example:
+              filter:
+                and:
+                  - bodyTemplate: welcome
+                  - or:
+                      - and:
+                          - status: PENDING_SEND
+                            hasSendAfter: true
+                            hasRequestedTemplateVersion: true
+                          - not:
+                              requestedTemplateVersion: 4
+                      - status: FAILED
+      responses:
+        '200':
+          description: One page of IDs and version tokens.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, page, pageSize, hasMore]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, version]
+                      properties:
+                        id: { type: string }
+                        version:
+                          type: string
+                          description: Opaque; compare for equality only.
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  hasMore: { type: boolean }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: |
+            The backend cannot list notification versions (`CONFLICT`, with
+            `details.reason` `UNSUPPORTED`).
           content:
             application/json:
               schema:
@@ -716,6 +843,88 @@ components:
             - $ref: '#/components/schemas/OneOffNotification'
             - $ref: '#/components/schemas/NotificationDetailFields'
 
+    NotificationSearchFilter:
+      description: |
+        A set of fields (ANDed), or a logical group. Strings match exactly;
+        dates are ISO-8601.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [and]
+          properties:
+            and:
+              type: array
+              minItems: 1
+              maxItems: 50
+              items: { $ref: '#/components/schemas/NotificationSearchFilter' }
+        - type: object
+          additionalProperties: false
+          required: [or]
+          properties:
+            or:
+              type: array
+              minItems: 1
+              maxItems: 50
+              items: { $ref: '#/components/schemas/NotificationSearchFilter' }
+        - type: object
+          additionalProperties: false
+          required: [not]
+          properties:
+            not: { $ref: '#/components/schemas/NotificationSearchFilter' }
+        - $ref: '#/components/schemas/NotificationSearchFilterFields'
+
+    NotificationSearchFilterFields:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationStatus'
+            - type: array
+              items: { $ref: '#/components/schemas/NotificationStatus' }
+        notificationType:
+          oneOf:
+            - { type: string, enum: [EMAIL, SMS, PUSH, IN_APP] }
+            - type: array
+              items: { type: string, enum: [EMAIL, SMS, PUSH, IN_APP] }
+        adapterUsed:
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+        userId: { type: string }
+        bodyTemplate: { type: string }
+        subjectTemplate: { type: string }
+        contextName: { type: string }
+        tenant:
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+        requestedTemplateVersion:
+          oneOf:
+            - { type: integer, minimum: 0 }
+            - { type: array, items: { type: integer, minimum: 0 } }
+        usedTemplateVersion:
+          oneOf:
+            - { type: integer, minimum: 0 }
+            - { type: array, items: { type: integer, minimum: 0 } }
+        hasSendAfter:
+          type: boolean
+          description: '`true`: has a send time; `false`: has none.'
+        hasRequestedTemplateVersion:
+          type: boolean
+          description: '`true`: pinned to some template version; `false`: unpinned.'
+        sendAfterRange: { $ref: '#/components/schemas/DateRange' }
+        createdAtRange: { $ref: '#/components/schemas/DateRange' }
+        sentAtRange: { $ref: '#/components/schemas/DateRange' }
+        readAtRange: { $ref: '#/components/schemas/DateRange' }
+
+    DateRange:
+      type: object
+      additionalProperties: false
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+
     PaginatedNotifications:
       type: object
       required: [data, page, pageSize, hasMore]
@@ -773,3 +982,7 @@ components:
               description: |
                 Optional machine-readable context. Every 400 carries `issues`, a
                 list of `{ path, message }`, and may carry other keys beside it.
+                A refused requeue or repin, and a versions search the backend
+                cannot run, carry `reason` (`INVALID_STATUS`,
+                `NO_TEMPLATE_VERSION`, `CHANGED`, `UNSUPPORTED`, or `NOT_FOUND`
+                on a 404).

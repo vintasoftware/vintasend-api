@@ -15,6 +15,12 @@ Two things this module absorbs so the routes stay simple:
    ``vintasend-django`` need.
 
 2. **One-off listing has no library method.** See :meth:`ServiceCaller.get_one_off_notifications`.
+
+3. **A service may predate the optional notification actions.** ``vintasend`` 3.8.0 added
+   ``expected_version``, ``template_version`` and ``send`` to requeue and repin, the version
+   search and the action capability report. A service built on an older release, or a custom
+   one, may lack any of them. See :meth:`ServiceCaller.action_capabilities` and
+   :meth:`ServiceCaller.options_it_cannot_take`.
 """
 
 import datetime
@@ -26,9 +32,10 @@ from typing import Any
 from asgiref.sync import async_to_sync
 from vintasend.constants import UNSET, UnsetType
 from vintasend.exceptions import NotificationNotFoundError, NotificationResendError
-from vintasend.services.dataclasses import Notification, OneOffNotification
+from vintasend.services.dataclasses import Notification, NotificationVersion, OneOffNotification
 from vintasend.services.helpers import _import_class
 from vintasend.services.notification_backends.filters import (
+    NotificationFilter,
     NotificationFilterFields,
     NotificationOrderBy,
 )
@@ -49,6 +56,47 @@ AnyNotification = Notification | OneOffNotification
 # page. Bounded so a store dominated by user notifications cannot turn one request into
 # an unbounded walk of the whole table.
 ONE_OFF_SCAN_PAGE_LIMIT = 50
+
+
+# The optional notification actions, as `/capabilities` reports them: always all four and always
+# explicit, because for these a missing key means "unsupported".
+ACTION_CAPABILITY_KEYS = (
+    "repin.expectedVersion",
+    "requeue.expectedVersion",
+    "requeue.templateVersion",
+    "versions.filter",
+)
+
+# Wire option -> the keyword argument the service's requeue / repin takes it as.
+ACTION_OPTION_KEYWORDS = {
+    "templateVersion": "template_version",
+    "expectedVersion": "expected_version",
+    "send": "send",
+}
+
+
+def _accepts_keyword(method: Any, keyword: str) -> bool:
+    """Whether ``method`` can be called with ``keyword=...``.
+
+    A method whose signature cannot be read is treated as not accepting it: the cost of a
+    wrong "no" is a 409 the caller can see, and of a wrong "yes" a ``TypeError`` that reaches
+    the client as a 500.
+    """
+    if not callable(method):
+        return False
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (
+            parameter.name == keyword
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        )
+        for parameter in parameters
+    )
 
 
 class ServiceConfigurationError(RuntimeError):
@@ -115,6 +163,7 @@ class ServiceCaller:
         self.service = service
         self.backend_identifier = backend_identifier
         self._backend_capabilities_cache: dict[str, Any] | None = None
+        self._action_capabilities_cache: dict[str, bool] | None = None
 
     # --- capabilities --------------------------------------------------------------
 
@@ -137,6 +186,72 @@ class ServiceCaller:
     def get_capabilities(self) -> dict[str, bool]:
         """Return the backend's capability report in wire form."""
         return to_wire_capabilities(self.backend_capabilities())
+
+    def _knows_action_options(self) -> bool:
+        """Whether the service is one that knows the optional notification actions.
+
+        ``get_backend_supported_action_capabilities`` arrived together with them, so a service
+        without it predates them -- and would drop ``template_version`` and
+        ``expected_version`` silently, and send despite ``send=False``.
+        """
+        return callable(getattr(self.service, "get_backend_supported_action_capabilities", None))
+
+    def action_capabilities(self) -> dict[str, bool]:
+        """Which optional notification actions this API can run, every key explicit.
+
+        What the backend reports, as the service merges it, and only ``True`` when the service
+        can also be called with the option: a service without
+        ``get_backend_supported_action_capabilities`` reports all four ``False``, a
+        ``requeue_notification`` / ``repin_notification`` that does not take the keyword turns
+        its key ``False``, and so does a missing ``filter_notification_versions``.
+
+        Cached for the life of this caller, like the filter capabilities, for the same reason.
+        """
+        if self._action_capabilities_cache is None:
+            reported: dict[str, Any] = {}
+            if self._knows_action_options():
+                reported = dict(
+                    _resolve(
+                        self.service.get_backend_supported_action_capabilities(
+                            self.backend_identifier
+                        )
+                    )
+                    or {}
+                )
+            requeue = getattr(self.service, "requeue_notification", None)
+            repin = getattr(self.service, "repin_notification", None)
+            callable_with = {
+                "repin.expectedVersion": _accepts_keyword(repin, "expected_version"),
+                "requeue.expectedVersion": _accepts_keyword(requeue, "expected_version"),
+                "requeue.templateVersion": _accepts_keyword(requeue, "template_version"),
+                "versions.filter": callable(
+                    getattr(self.service, "filter_notification_versions", None)
+                ),
+            }
+            self._action_capabilities_cache = {
+                key: reported.get(key) is True and callable_with[key]
+                for key in ACTION_CAPABILITY_KEYS
+            }
+        return self._action_capabilities_cache
+
+    def options_it_cannot_take(self, method_name: str, options: list[str]) -> list[str]:
+        """The wire options in ``options`` the service's ``method_name`` cannot be given.
+
+        All of them for a service that predates the optional actions, whatever its signature
+        says; otherwise the ones whose keyword the method does not accept. A service that can
+        take an option but whose backend cannot honour it is not caught here: the service
+        refuses that itself, with ``NotificationActionError`` reason ``UNSUPPORTED``.
+        """
+        if not options:
+            return []
+        if not self._knows_action_options():
+            return list(options)
+        method = getattr(self.service, method_name, None)
+        return [
+            option
+            for option in options
+            if not _accepts_keyword(method, ACTION_OPTION_KEYWORDS[option])
+        ]
 
     def _page(self, wire_page: int) -> int:
         """Convert a contract page number into the backend's own numbering.
@@ -241,6 +356,21 @@ class ServiceCaller:
 
         return collected
 
+    def filter_notification_versions(
+        self, backend_filter: NotificationFilter, page: int, page_size: int
+    ) -> list[NotificationVersion]:
+        """IDs and version tokens of the notifications matching ``backend_filter``.
+
+        Only call this when ``action_capabilities()["versions.filter"]`` is ``True``.
+        """
+        return list(
+            _resolve(
+                self.service.filter_notification_versions(
+                    backend_filter, self._page(page), page_size, self.backend_identifier
+                )
+            )
+        )
+
     def get_notification(self, notification_id: str) -> AnyNotification | None:
         """Look one notification up, returning ``None`` when it does not exist.
 
@@ -285,26 +415,50 @@ class ServiceCaller:
         self,
         notification_id: str,
         send_after: datetime.datetime | UnsetType | None = UNSET,
+        *,
+        template_version: int | None = None,
+        expected_version: str | None = None,
+        send: bool | None = None,
     ) -> AnyNotification:
         """Requeue a failed or cancelled notification on the primary backend.
 
-        ``send_after`` is passed only when the caller gave one, ``None`` included: left out,
-        the notification keeps its own. The service's ``NotificationActionError`` refusals
-        propagate, and the route maps them onto 404 and 409.
+        Each option is passed only when the caller gave one, so a service that predates
+        ``template_version``, ``expected_version`` and ``send`` never sees them -- the route
+        refuses those first, see :meth:`options_it_cannot_take`. ``send_after`` likewise,
+        ``None`` included: left out, the notification keeps its own. The service's
+        ``NotificationActionError`` refusals propagate, and the route maps them onto 404 and
+        409.
         """
-        if send_after is UNSET:
-            return _resolve(self.service.requeue_notification(notification_id))
-        return _resolve(self.service.requeue_notification(notification_id, send_after=send_after))
+        options: dict[str, Any] = {}
+        if send_after is not UNSET:
+            options["send_after"] = send_after
+        if template_version is not None:
+            options["template_version"] = template_version
+        if expected_version is not None:
+            options["expected_version"] = expected_version
+        if send is not None:
+            options["send"] = send
+        return _resolve(self.service.requeue_notification(notification_id, **options))
 
     def repin_notification(
-        self, notification_id: str, template_version: int | None = None
+        self,
+        notification_id: str,
+        template_version: int | None = None,
+        *,
+        expected_version: str | None = None,
     ) -> AnyNotification:
         """Pin a notification to a template version, by default the current one.
 
-        The service's ``NotificationActionError`` refusals propagate, as for requeue.
+        ``expected_version`` is passed only when given, as for requeue. The service's
+        ``NotificationActionError`` refusals propagate, as for requeue.
         """
+        options: dict[str, Any] = {}
+        if expected_version is not None:
+            options["expected_version"] = expected_version
         return _resolve(
-            self.service.repin_notification(notification_id, template_version=template_version)
+            self.service.repin_notification(
+                notification_id, template_version=template_version, **options
+            )
         )
 
     # --- rendering -----------------------------------------------------------------

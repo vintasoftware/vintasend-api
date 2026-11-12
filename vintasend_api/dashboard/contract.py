@@ -172,6 +172,17 @@ class NotificationPreviewOut(Schema):
     renderedSubjectHtml: str
 
 
+class NotificationVersionOut(Schema):
+    """One row of ``POST /api/v1/notifications/versions``: an ID and its version token.
+
+    ``version`` is opaque: compare it for equality only, or pass it back as
+    ``expectedVersion`` to requeue or repin.
+    """
+
+    id: str
+    version: str
+
+
 class CancelledNotificationOut(Schema):
     """Payload of ``POST /api/v1/notifications/{id}/cancel`` on success."""
 

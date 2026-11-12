@@ -51,16 +51,17 @@ rendering, GitHub template lookups. The UI owns presentation and user authentica
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness probe (unauthenticated) |
-| GET | `/api/v1/capabilities` | Filter/order capabilities of the configured backend |
+| GET | `/api/v1/capabilities` | Filter, order and action capabilities of the configured backend |
 | GET | `/api/v1/notifications` | List notifications with filters, ordering and pagination |
 | GET | `/api/v1/notifications/pending` | Notifications awaiting send |
 | GET | `/api/v1/notifications/future` | Notifications scheduled for the future |
 | GET | `/api/v1/notifications/one-off` | One-off notifications |
+| POST | `/api/v1/notifications/versions` | IDs and version tokens of matching notifications, without their content |
 | GET | `/api/v1/notifications/{id}` | One notification, including context payloads |
 | GET | `/api/v1/notifications/{id}/preview` | Templates rendered at the notification's commit |
 | POST | `/api/v1/notifications/{id}/resend` | Resend a notification |
 | POST | `/api/v1/notifications/{id}/cancel` | Cancel a pending notification |
-| POST | `/api/v1/notifications/{id}/requeue` | Put a failed or cancelled notification back into `PENDING_SEND` |
+| POST | `/api/v1/notifications/{id}/requeue` | Put a failed or cancelled notification back into `PENDING_SEND`, optionally repinning it in the same write |
 | POST | `/api/v1/notifications/{id}/repin` | Pin a notification that was not delivered to a template version |
 
 ### Requeue and repin
@@ -69,20 +70,97 @@ Both answer `{ "data": Notification }`, serialized like a list row (`kind`, ISO-
 timestamps, `null` for unset values). Both bodies are optional, and wire names stay
 camelCase.
 
-- **`requeue`** takes `{ "sendAfter"?: string | null }`. Left out, the notification keeps
-  its own `sendAfter`; `null` sends it as soon as it is requeued. A date without a time zone
-  is read as UTC. The notification keeps its ID, content and template pin, and is sent right
-  away when it is due, so the returned row may already be stale. 409 when it is not `FAILED`
-  or `CANCELLED`.
-- **`repin`** takes `{ "templateVersion"?: integer }`, which must be a JSON integer `>= 0`
-  (`0` is valid). `-1`, `1.5`, `"3"`, `true` and `null` are 400s. Left out, the version the
-  template renderer reports as current is pinned. It neither sends nor changes the status.
-  409 when the notification was already delivered, or when no version was given and the
-  renderer reports none.
+- **`requeue`** takes `{ "sendAfter"?: string | null, "templateVersion"?: integer,
+  "expectedVersion"?: string, "send"?: boolean }`.
+  - `sendAfter` left out keeps the notification's own send time; `null` sends it as soon as
+    it is requeued. A date without a time zone is read as UTC.
+  - `templateVersion` pins that version in the same write that requeues it, so a failed
+    notification can be moved onto a fixed template in one step.
+  - `expectedVersion` requeues only if the notification is still at that version, the token
+    `POST /api/v1/notifications/versions` returned for it.
+  - `send: false` leaves the notification in `PENDING_SEND` for whatever sends pending
+    notifications, even when it is due. It defaults to `true`, and then a due notification is
+    sent before the API answers.
 
-Both answer 404 for an unknown ID. The 404 and 409 messages are the core library's, which
-name the notification by ID only. Any other failure is the generic 500 `INTERNAL_ERROR`,
-which never includes the underlying error's message.
+  The answer is the notification as it stands after that send, re-read from the primary
+  backend: `SENT` when it went out, `FAILED` when the adapter failed, `PENDING_SEND` when it is
+  waiting. It keeps its ID, content and, unless `templateVersion` is given, its template pin.
+- **`repin`** takes `{ "templateVersion"?: integer, "expectedVersion"?: string }`.
+  `templateVersion` must be a JSON integer `>= 0` (`0` is valid); `-1`, `1.5`, `"3"`, `true`
+  and `null` are 400s. Left out, the version the template renderer reports as current is
+  pinned, the same lookup a new notification gets. It neither sends nor changes the status.
+  `expectedVersion` works as on requeue.
+
+`templateVersion` must be an integer `>= 0` on both routes, and `expectedVersion` a string of
+1 to 256 characters.
+
+#### Refusals
+
+Every refusal writes nothing and names the notification by ID only. A 404 or 409 carries
+`details.reason`:
+
+| Status | `details.reason` | When |
+| --- | --- | --- |
+| 404 | `NOT_FOUND` | No notification has that ID. |
+| 409 | `INVALID_STATUS` | Requeue: the notification is not `FAILED` or `CANCELLED`. Repin: it was already delivered. |
+| 409 | `NO_TEMPLATE_VERSION` | Repin without `templateVersion`, and the renderer reports no current version. |
+| 409 | `CHANGED` | The notification was written since `expectedVersion` was read. |
+| 409 | `UNSUPPORTED` | The backend, or the configured service, cannot honour `templateVersion` on requeue, `expectedVersion`, or `send`. |
+
+`UNSUPPORTED` is decided before anything is read. An option this API cannot pass to the
+configured service at all, because the service predates it (a `vintasend` older than 3.8.0) or
+its method does not take that keyword, is refused the same way rather than dropped: a requeue
+that silently ignored `expectedVersion` would write over a change it was asked to protect. Any
+other failure is the generic 500 `INTERNAL_ERROR`, which never includes the underlying error's
+message.
+
+#### Moving notifications safely
+
+`POST /api/v1/notifications/versions` takes `{ "filter"?, "page"?, "pageSize"? }` and answers
+`{ data: [{ id, version }], page, pageSize, hasMore }`, ordered by ID. The backend reads no
+recipient, context or rendered content to answer it. `filter` is the composable filter from the
+`vintasend` library in its wire spelling: a set of camelCase fields (ANDed), or `{ "and": [...] }`,
+`{ "or": [...] }`, `{ "not": ... }`, nesting at most six levels. It adds two presence fields,
+`hasSendAfter` and `hasRequestedTemplateVersion`, so "pinned, but not to 4" is expressible:
+
+```json
+{
+  "filter": {
+    "and": [
+      { "bodyTemplate": "welcome", "hasRequestedTemplateVersion": true },
+      { "not": { "requestedTemplateVersion": 4 } }
+    ]
+  },
+  "pageSize": 100
+}
+```
+
+Pass each `version` as `expectedVersion` to `requeue` or `repin`, and a notification that
+changed in between is refused with `CHANGED` instead of being overwritten. Moving notifications
+changes what matches, so list again from page 1 rather than moving on to page 2. A filter the
+backend reports it cannot run is a 400 naming what it cannot do, and a backend that cannot list
+versions at all is a 409 `UNSUPPORTED`. `userId`, `bodyTemplate`, `subjectTemplate` and
+`contextName` match exactly and case-sensitively, so a backend reporting
+`stringLookups.exact` or `stringLookups.caseSensitive` as `false` (a case-insensitive
+collation, say) answers a filter using any of them with that 400 rather than match more than
+was asked.
+
+`/api/v1/capabilities` carries the four action keys alongside the filter keys, always present
+and `false` unless both the backend reports them and the configured service can be called with
+the option: `repin.expectedVersion`, `requeue.expectedVersion`, `requeue.templateVersion` and
+`versions.filter`. The presence filters are reported as `fields.hasSendAfter`,
+`fields.hasRequestedTemplateVersion` and their `negation.*` keys, which default to `false` in
+the library, so a backend that predates them never claims them.
+
+When `VINTASEND_BACKEND_IDENTIFIER` names a replica, the versions search reads the replica and
+requeue and repin still run on the primary. That works because, since `vintasend` 3.8.0, a
+replica that applies replication snapshots, or takes the primary's token on its writes, holds the
+primary's version token once its copy of a notification matches the primary's. A version listed
+from it is therefore one the primary accepts, and a replica that has not caught up hands out a
+version the primary refuses (usually with `CHANGED`); list again. `/capabilities` follows where
+each action runs: the `requeue.*` and `repin.*` keys are the primary's, and `versions.filter` is
+`true` only for a replica that carries the primary's tokens. A replica that keeps tokens of its
+own reports `false`, and the versions search is a 409 `UNSUPPORTED` there.
 
 A browsable version of the generated schema is served at `/api/v1/docs`.
 
@@ -100,7 +178,8 @@ Conventions the dashboard depends on:
   [Template versions](#template-versions).
 - Errors always use the envelope `{ "error": { "code", "message", "details"? } }`, and
   every 400 carries `details.issues: [{ path, message }]` — `path` empty for the body as a
-  whole.
+  whole. A refused requeue, repin or versions search carries `details.reason` instead (see
+  [Refusals](#refusals)).
 - Request bodies are JSON. A request declaring `application/json` (or any
   `application/*+json`) must carry a valid JSON object. One declaring no media type, or
   another one, counts as an omitted body when it is empty and is a 400 otherwise:

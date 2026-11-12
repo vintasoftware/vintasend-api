@@ -7,6 +7,8 @@ on the wire, and validation and auth failures go through the same code as raised
 
 from typing import Any
 
+from vintasend.exceptions import NotificationActionError
+
 from .contract import ApiErrorCode
 
 
@@ -73,6 +75,15 @@ class ApiError(Exception):
     def upstream(cls, message: str) -> "ApiError":
         return cls("UPSTREAM_ERROR", message)
 
+    @classmethod
+    def unsupported(cls, message: str) -> "ApiError":
+        """A 409 for something the configured backend, or the service in front of it, cannot do.
+
+        Shaped like the service's own ``UNSUPPORTED`` refusal, so a client reads one
+        ``details.reason`` whichever of the two refused.
+        """
+        return cls("CONFLICT", message, {"reason": "UNSUPPORTED"})
+
 
 def issue(path: str, message: str) -> dict[str, str]:
     """One entry of a 400's ``details.issues``. ``path`` is dotted, and empty for the body."""
@@ -82,3 +93,16 @@ def issue(path: str, message: str) -> dict[str, str]:
 def invalid_request(issues: list[Any]) -> ApiError:
     """The 400 for input that failed validation, wherever in the request it was."""
     return ApiError.bad_request("Invalid request.", issues)
+
+
+def from_notification_action_error(error: NotificationActionError) -> ApiError:
+    """The contract error for a requeue or repin the service refused.
+
+    ``NOT_FOUND`` is a 404 and every other refusal a 409 ``CONFLICT``. Both carry the service's
+    reason as ``details.reason`` (``INVALID_STATUS``, ``NO_TEMPLATE_VERSION``, ``CHANGED``,
+    ``UNSUPPORTED``), so a client can tell "it changed since you listed it" from "it cannot
+    move". The service's message names the notification by its ID and nothing else, so it is
+    passed on as it is.
+    """
+    code: ApiErrorCode = "NOT_FOUND" if error.reason == "NOT_FOUND" else "CONFLICT"
+    return ApiError(code, error.message, {"reason": error.reason})

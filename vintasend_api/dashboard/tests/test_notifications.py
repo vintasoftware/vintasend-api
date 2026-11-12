@@ -13,6 +13,7 @@ from vintasend.constants import NotificationStatus, NotificationTypes
 from vintasend.exceptions import NotificationResendError
 
 from .fixtures import (
+    NO_ACTION_CAPABILITIES,
     FakeService,
     FakeTemplateClient,
     make_one_off_notification,
@@ -856,7 +857,7 @@ def test_capabilities_returns_the_backend_capability_map(
 
     body = get("/api/v1/capabilities").json()
 
-    assert body == {"data": {"orderBy.sentAt": False}}
+    assert body == {"data": {"orderBy.sentAt": False, **NO_ACTION_CAPABILITIES}}
 
 
 def test_a_zero_indexed_backend_gets_zero_indexed_pages(
@@ -919,7 +920,7 @@ def test_the_pagination_convention_is_not_published_to_the_dashboard(
 
     body = get("/api/v1/capabilities").json()
 
-    assert body == {"data": {"orderBy.sentAt": True}}
+    assert body == {"data": {"orderBy.sentAt": True, **NO_ACTION_CAPABILITIES}}
 
 
 def test_the_whole_pagination_namespace_is_withheld_from_the_dashboard(
@@ -940,7 +941,7 @@ def test_the_whole_pagination_namespace_is_withheld_from_the_dashboard(
 
     body = get("/api/v1/capabilities").json()
 
-    assert body == {"data": {"orderBy.sentAt": True}}
+    assert body == {"data": {"orderBy.sentAt": True, **NO_ACTION_CAPABILITIES}}
 
 
 def test_the_page_response_still_reports_the_requested_page(
@@ -992,5 +993,6 @@ def test_capabilities_passes_both_case_sensitivity_keys_through_unchanged(
         "data": {
             "stringLookups.caseSensitive": False,
             "stringLookups.caseInsensitive": True,
+            **NO_ACTION_CAPABILITIES,
         }
     }

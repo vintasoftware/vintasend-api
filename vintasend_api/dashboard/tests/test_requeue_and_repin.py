@@ -282,7 +282,13 @@ def test_requeue_404s_when_the_service_finds_no_notification(
     response = post("/api/v1/notifications/missing/requeue")
 
     assert response.status_code == 404
-    assert response.json() == {"error": {"code": "NOT_FOUND", "message": "Refused: NOT_FOUND"}}
+    assert response.json() == {
+        "error": {
+            "code": "NOT_FOUND",
+            "message": "Refused: NOT_FOUND",
+            "details": {"reason": "NOT_FOUND"},
+        }
+    }
 
 
 def test_requeue_409s_when_the_status_does_not_allow_it(
@@ -293,7 +299,13 @@ def test_requeue_409s_when_the_status_does_not_allow_it(
     response = post(REQUEUE)
 
     assert response.status_code == 409
-    assert response.json() == {"error": {"code": "CONFLICT", "message": "Refused: INVALID_STATUS"}}
+    assert response.json() == {
+        "error": {
+            "code": "CONFLICT",
+            "message": "Refused: INVALID_STATUS",
+            "details": {"reason": "INVALID_STATUS"},
+        }
+    }
 
 
 def test_requeue_answers_any_other_failure_with_a_generic_500(
@@ -383,7 +395,13 @@ def test_repin_409s_on_a_refusal(
     response = post(REPIN)
 
     assert response.status_code == 409
-    assert response.json() == {"error": {"code": "CONFLICT", "message": f"Refused: {reason}"}}
+    assert response.json() == {
+        "error": {
+            "code": "CONFLICT",
+            "message": f"Refused: {reason}",
+            "details": {"reason": reason},
+        }
+    }
 
 
 def test_repin_404s_when_the_service_finds_no_notification(
